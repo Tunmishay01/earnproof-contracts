@@ -45,3 +45,38 @@ For the checked-in example manifest:
 ```
 
 The verifier checks the manifest shape and rejects placeholder contract IDs unless `-AllowPlaceholders` is explicitly supplied.
+
+## Audit WASM Imports and Exports
+
+After building the release artifacts, run the import/export audit to confirm no forbidden host symbols appear in the contracts:
+
+```powershell
+.\scripts\audit-wasm.ps1
+```
+
+This builds the `tools/audit-wasm` Rust binary, then checks every release WASM artifact against the allowlist in `scripts/wasm-import-policy.toml`. The script exits non-zero and prints each violation if any symbol is absent from the policy.
+
+To audit already-built artifacts without rebuilding:
+
+```powershell
+.\scripts\audit-wasm.ps1 -SkipBuildContracts
+```
+
+To use a different policy file:
+
+```powershell
+.\scripts\audit-wasm.ps1 -Policy path/to/custom-policy.toml
+```
+
+The audit runs in CI on every pull request and push to `main`. See `.github/workflows/ci.yml`.
+
+### Policy file
+
+`scripts/wasm-import-policy.toml` is the reviewed allowlist. It lists:
+
+- every permitted Soroban host function import (single-letter module name `::` function short-name);
+- every permitted contract export (function names, `memory`, `__data_end`, `__heap_base`).
+
+The `t` (test) host module is intentionally absent from the import allowlist. Any `t::*` import in a release artifact is a critical violation indicating that `soroban-sdk` testutils were compiled into production code.
+
+To add a new permitted symbol, review it, add it to the appropriate section in `wasm-import-policy.toml`, and add a comment explaining why it is expected.
