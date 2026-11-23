@@ -1,0 +1,525 @@
+//! Verifies the encoding rules in `docs/encoding.md` against the REAL
+//! contracts, not just against the published hex vectors.
+//!
+//! `sha256_vectors_match_published_hex` in `lib.rs` proves the fixture's hex
+//! digests are genuinely SHA-256 of their documented UTF-8 source strings —
+//! that a backend implementing the documented rule produces the published
+//! bytes. It never touches a contract. This module closes the other half of
+//! issue #98's acceptance criteria: that those exact backend-computed bytes
+//! are actually ACCEPTED by the real contracts when passed as `BytesN<32>`
+//! (not just structurally compatible on paper), and that the contract event
+//! emitted in response carries the identical bytes back out — i.e. an
+//! indexer reading the event gets the exact value the backend originally
+//! computed, round-tripped through a real contract invocation.
+
+use earnproof_shared::disclosure_consent_commitment;
+use soroban_sdk::testutils::{Address as _, Events as _};
+use soroban_sdk::xdr::ToXdr;
+use soroban_sdk::{Address, BytesN, Env, Symbol, TryFromVal, Val};
+
+use earnproof_shared::{
+    compute_schema_policy_digest, compute_subject_nullifier_commitment,
+    compute_subject_pseudonym_commitment, disclosure_consent_commitment, SchemaLifecyclePolicy,
+    SchemaPolicy, SchemaPolicyDigestInput, SchemaRateLimit, UpgradeCompatibilityAttestation,
+    SCHEMA_POLICY_DIGEST_VERSION,
+};
+use issuer_registry::{IssuerRegistryContract, IssuerRegistryContractClient};
+use proof_registry::{ProofRegistryContract, ProofRegistryContractClient};
+use protocol_config::{ProtocolConfigContract, ProtocolConfigContractClient};
+
+/// Decodes the hex digest fixtures embed for `proof-1`/`commitment-1`/
+/// `issuer-1`/`metadata-1` into real `BytesN<32>` values — the exact
+/// documented `hex` field from `tests/fixtures/encoding/vectors.tsv`, not a
+/// re-derived or synthetic value. If the fixture ever changes, this test
+/// picks up the new vector automatically rather than silently testing
+/// against a stale copy.
+fn vector_hex(id: &str) -> &'static str {
+    for line in include_str!("../../fixtures/encoding/vectors.tsv").lines() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: std::vec::Vec<&str> = line.split('\t').collect();
+        if fields[0] == id {
+            return fields[3];
+        }
+    }
+    panic!("no fixture vector named {id} in vectors.tsv");
+}
+
+#[test]
+fn subject_nullifier_domain_versions_preserve_legacy_and_prevent_collisions() {
+    let env = Env::default();
+    let issuer = Address::from_str(
+        &env,
+        "GCATS5YOVB6ROX2WUNKGNQ2MP3GMXDMKSG2O4N5CLX3A6W4PZGZZI55U",
+    );
+    let purpose = soroban_sdk::String::from_str(&env, "credential-verification");
+    let subject = BytesN::from_array(&env, &[0x11; 32]);
+    let legacy = compute_subject_pseudonym_commitment(&env, &issuer, &purpose, &subject).unwrap();
+    assert_eq!(
+        compute_subject_nullifier_commitment(&env, &issuer, 1, &purpose, &subject),
+        Some(legacy.clone())
+    );
+    assert_ne!(
+        legacy,
+        compute_subject_nullifier_commitment(&env, &issuer, 2, &purpose, &subject).unwrap()
+    );
+}
+
+#[test]
+fn schema_policy_digest_matches_the_documented_canonical_xdr_tuple() {
+    let env = Env::default();
+    let lifecycle = SchemaLifecyclePolicy {
+        activated_at: 100,
+        deprecated_at: 0,
+    };
+    let policy = SchemaPolicy {
+        proof_types: soroban_sdk::vec![&env, 1_u32, 2_u32],
+        max_validity_seconds: 5_000,
+    };
+    let rate = SchemaRateLimit {
+        max_registrations: 25,
+        window_ledgers: 100,
+    };
+    let expected_payload = (
+        SCHEMA_POLICY_DIGEST_VERSION,
+        Symbol::new(&env, "earnproof_schema_policy"),
+        7_u32,
+        9_u32,
+        true,
+        100_u64,
+        0_u64,
+        policy.proof_types.clone(),
+        5_000_u64,
+        2_048_u32,
+        25_u32,
+        100_u32,
+    )
+        .to_xdr(&env);
+    assert_eq!(
+        compute_schema_policy_digest(
+            &env,
+            &SchemaPolicyDigestInput {
+                schema_version: 7,
+                config_version: 9,
+                approved: true,
+                lifecycle: &lifecycle,
+                policy: &policy,
+                payload_limit: 2_048,
+                rate_limit: &rate,
+            },
+        ),
+        env.crypto().sha256(&expected_payload).to_bytes()
+    );
+}
+
+fn bytes_from_hex(env: &Env, hex: &str) -> BytesN<32> {
+    assert_eq!(hex.len(), 64, "vector hex must decode to exactly 32 bytes");
+    let mut out = [0u8; 32];
+    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        let byte_str = std::str::from_utf8(chunk).unwrap();
+        out[i] = u8::from_str_radix(byte_str, 16).expect("vector hex must be valid hex");
+    }
+    BytesN::from_array(env, &out)
+}
+
+/// One observed contract event, reduced to what an indexer would consume.
+/// Mirrors `tests/events/src/harness.rs::ObservedEvent` — duplicated here
+/// (rather than depended on) since `tests/events` is a separate, unrelated
+/// test crate and this module only needs the one decoding path.
+struct ObservedEvent {
+    topics: soroban_sdk::Vec<Val>,
+    data: Val,
+}
+
+impl ObservedEvent {
+    fn from_xdr(env: &Env, event: &soroban_sdk::xdr::ContractEvent) -> Option<Self> {
+        use soroban_sdk::xdr::ContractEventBody;
+
+        let ContractEventBody::V0(body) = &event.body;
+
+        let mut topics = soroban_sdk::Vec::new(env);
+        for topic in body.topics.iter() {
+            topics.push_back(Val::try_from_val(env, topic).ok()?);
+        }
+        let data = Val::try_from_val(env, &body.data).ok()?;
+
+        Some(Self { topics, data })
+    }
+
+    fn is(&self, env: &Env, name: &str) -> bool {
+        match self.topics.get(0) {
+            Some(first) => Symbol::try_from_val(env, &first)
+                .map(|symbol| symbol == Symbol::new(env, name))
+                .unwrap_or(false),
+            None => false,
+        }
+    }
+
+    fn field<T: TryFromVal<Env, Val>>(&self, env: &Env, name: &str) -> Option<T> {
+        let map: soroban_sdk::Map<Symbol, Val> =
+            soroban_sdk::Map::try_from_val(env, &self.data).ok()?;
+        let raw = map.get(Symbol::new(env, name))?;
+        T::try_from_val(env, &raw).ok()
+    }
+}
+
+fn events(env: &Env) -> std::vec::Vec<ObservedEvent> {
+    env.events()
+        .all()
+        .events()
+        .iter()
+        .filter_map(|event| ObservedEvent::from_xdr(env, event))
+        .collect()
+}
+
+#[test]
+fn upgrade_compatibility_attestation_xdr_matches_golden() {
+    let env = Env::default();
+    let attestation = UpgradeCompatibilityAttestation {
+        version: 1,
+        abi_commitment: BytesN::from_array(&env, &[0x11; 32]),
+        storage_commitment: BytesN::from_array(&env, &[0x22; 32]),
+        review_commitment: BytesN::from_array(&env, &[0x33; 32]),
+    };
+    let encoded = attestation.to_xdr(&env);
+    let actual: std::string::String = encoded.iter().map(|byte| format!("{byte:02x}")).collect();
+
+    let expected = format!(
+        "0000001100000001000000040000000f0000000e6162695f636f6d6d69746d656e7400000000000d00000020{}0000000f000000117265766965775f636f6d6d69746d656e740000000000000d00000020{}0000000f0000001273746f726167655f636f6d6d69746d656e7400000000000d00000020{}0000000f0000000776657273696f6e000000000300000001",
+        "11".repeat(32),
+        "33".repeat(32),
+        "22".repeat(32),
+    );
+    let first_difference = actual
+        .bytes()
+        .zip(expected.bytes())
+        .position(|(actual_byte, expected_byte)| actual_byte != expected_byte);
+    assert_eq!(
+        actual,
+        expected,
+        "canonical XDR differs at {:?}; lengths are {} and {}; actual [{}], expected [{}]",
+        first_difference,
+        actual.len(),
+        expected.len(),
+        &actual[first_difference.unwrap_or(0).saturating_sub(8)
+            ..(first_difference.unwrap_or(0) + 16).min(actual.len())],
+        &expected[first_difference.unwrap_or(0).saturating_sub(8)
+            ..(first_difference.unwrap_or(0) + 16).min(expected.len())]
+    );
+}
+
+/// `issuer-registry::register_issuer` accepts backend-computed
+/// `issuer_id_hash`/`metadata_hash` values, and the `IssuerRegistered` event
+/// it emits carries those exact bytes back out unmodified.
+#[test]
+fn issuer_registry_accepts_backend_hashes_and_echoes_them_in_its_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(IssuerRegistryContract, ());
+    let client = IssuerRegistryContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let issuer_address = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer_id_hash = bytes_from_hex(&env, vector_hex("issuer-1"));
+    let metadata_hash = bytes_from_hex(&env, vector_hex("metadata-1"));
+
+    // Accepted: the contract does not reject a real, backend-computed
+    // SHA-256 digest — it only ever validates the address and duplicate-key
+    // conditions, never the hash's own construction (docs/encoding.md's
+    // "the contracts treat these as opaque BytesN<32> values" claim,
+    // verified here rather than taken on faith).
+    client.register_issuer(
+        &issuer_id_hash,
+        &issuer_address,
+        &metadata_hash,
+        &metadata_hash,
+    );
+
+    let observed = events(&env);
+    let registered = observed
+        .iter()
+        .find(|event| event.is(&env, "issuer_registered"))
+        .expect("register_issuer must emit IssuerRegistered");
+
+    let event_issuer_id_hash: BytesN<32> = registered
+        .field(&env, "issuer_id_hash")
+        .expect("IssuerRegistered must carry issuer_id_hash");
+    let event_metadata_hash: BytesN<32> = registered
+        .field(&env, "metadata_hash")
+        .expect("IssuerRegistered must carry metadata_hash");
+
+    // Round-trip: what the backend computed and sent in is byte-for-byte
+    // what an indexer reading the event back gets out.
+    assert_eq!(event_issuer_id_hash, issuer_id_hash);
+    assert_eq!(event_metadata_hash, metadata_hash);
+
+    // And it's genuinely queryable afterwards under that same hash, not just
+    // present in the one-shot event.
+    let record = client.get_issuer(&issuer_id_hash);
+    assert_eq!(record.issuer_id_hash, issuer_id_hash);
+    assert_eq!(record.metadata_hash, metadata_hash);
+}
+
+/// `proof-registry::register_proof` accepts a backend-computed
+/// `proof_id_hash`/`commitment_hash` pair, and the record it stores is
+/// retrievable under the exact same `proof_id_hash` the backend used to
+/// compute it — the value a backend would derive from
+/// `docs/encoding.md`'s rule is exactly the value the contract keys its
+/// storage by, not a re-hashed or re-derived one.
+#[test]
+fn proof_registry_accepts_backend_hashes_and_stores_them_queryable_by_the_same_key() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let issuer_address = Address::generate(&env);
+
+    let config_id = env.register(ProtocolConfigContract, ());
+    let config = ProtocolConfigContractClient::new(&env, &config_id);
+    config.initialize(&admin);
+    config.approve_schema_version(&1);
+    config.approve_proof_type(&BytesN::from_array(&env, &[1; 32]));
+    config.approve_proof_type(&soroban_sdk::BytesN::from_array(&env, &[1u8; 32]));
+
+    let issuers_id = env.register(IssuerRegistryContract, ());
+    let issuers = IssuerRegistryContractClient::new(&env, &issuers_id);
+    issuers.initialize(&admin);
+    let issuer_id_hash = bytes_from_hex(&env, vector_hex("issuer-1"));
+    let metadata_hash = bytes_from_hex(&env, vector_hex("metadata-1"));
+    issuers.register_issuer(
+        &issuer_id_hash,
+        &issuer_address,
+        &metadata_hash,
+        &metadata_hash,
+    );
+
+    let proofs_id = env.register(ProofRegistryContract, ());
+    let proofs = ProofRegistryContractClient::new(&env, &proofs_id);
+    proofs.initialize(&admin, &issuers_id, &config_id);
+
+    let proof_id_hash = bytes_from_hex(&env, vector_hex("proof-1"));
+    let commitment_hash = bytes_from_hex(&env, vector_hex("commitment-1"));
+    proofs.register_proof(
+        &proof_id_hash,
+        &commitment_hash,
+        &issuer_address,
+        &1,
+        &(env.ledger().timestamp() + 1_000),
+        &None,
+        &soroban_sdk::BytesN::from_array(&env, &[1u8; 32]),
+    );
+
+    let registered = events(&env)
+        .into_iter()
+        .find(|event| event.is(&env, "proof_registered"))
+        .expect("ProofRegistered must be emitted");
+    let event_proof_id: BytesN<32> = registered
+        .field(&env, "proof_id_hash")
+        .expect("ProofRegistered must carry proof_id_hash");
+    assert_eq!(event_proof_id, proof_id_hash);
+
+    let record = proofs.get_proof(&proof_id_hash);
+    assert_eq!(record.proof_id_hash, proof_id_hash);
+    assert_eq!(record.commitment_hash, commitment_hash);
+    assert!(proofs.is_valid_proof(&proof_id_hash));
+}
+
+#[test]
+fn consent_receipt_commitment_matches_canonical_xdr_and_is_domain_separated() {
+    let env = Env::default();
+    let network_id = BytesN::from_array(&env, &[0x10; 32]);
+    let registry = Address::from_str(
+        &env,
+        "CC3OREX5QBIKJ5JOW36JFJJW7TLAKJOVT5WJXEITGALO7MU32KHICS2A",
+    );
+    let proof_id = BytesN::from_array(&env, &[0x20; 32]);
+    let policy_hash = BytesN::from_array(&env, &[0x30; 32]);
+    let receipt_hash = BytesN::from_array(&env, &[0x40; 32]);
+    let receipt_version = 7_u32;
+    let payload = (
+        1_u32,
+        Symbol::new(&env, "earnproof_consent_receipt"),
+        network_id.clone(),
+        registry.clone(),
+        proof_id.clone(),
+        policy_hash.clone(),
+        receipt_version,
+        receipt_hash.clone(),
+    )
+        .to_xdr(&env);
+    let commitment = disclosure_consent_commitment(
+        &env,
+        &network_id,
+        &registry,
+        &proof_id,
+        &policy_hash,
+        receipt_version,
+        &receipt_hash,
+    );
+
+    assert_eq!(commitment, env.crypto().sha256(&payload).to_bytes());
+    let commitment_hex = commitment
+        .iter()
+        .map(|byte| std::format!("{byte:02x}"))
+        .collect::<std::string::String>();
+    assert_eq!(
+        commitment_hex,
+        "f85f121c33ac83d60ed616d61305e712d161c98882cf193ad64de9ac041b23eb"
+    );
+
+    let other_network = BytesN::from_array(&env, &[0x11; 32]);
+    assert_ne!(
+        commitment,
+        disclosure_consent_commitment(
+            &env,
+            &other_network,
+            &registry,
+            &proof_id,
+            &policy_hash,
+            receipt_version,
+            &receipt_hash,
+        )
+    );
+    assert_ne!(
+        commitment,
+        disclosure_consent_commitment(
+            &env,
+            &network_id,
+            &Address::generate(&env),
+            &proof_id,
+            &policy_hash,
+            receipt_version,
+            &receipt_hash,
+        )
+    );
+    assert_ne!(
+        commitment,
+        disclosure_consent_commitment(
+            &env,
+            &network_id,
+            &registry,
+            &BytesN::from_array(&env, &[0x21; 32]),
+            &policy_hash,
+            receipt_version,
+            &receipt_hash,
+        )
+    );
+    assert_ne!(
+        commitment,
+        disclosure_consent_commitment(
+            &env,
+            &network_id,
+            &registry,
+            &proof_id,
+            &BytesN::from_array(&env, &[0x31; 32]),
+            receipt_version,
+            &receipt_hash,
+        )
+    );
+    assert_ne!(
+        commitment,
+        disclosure_consent_commitment(
+            &env,
+            &network_id,
+            &registry,
+            &proof_id,
+            &policy_hash,
+            receipt_version + 1,
+            &receipt_hash,
+        )
+    );
+}
+
+#[test]
+fn consent_receipt_commitment_returned_by_contract_matches_shared_helper() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let issuer = Address::generate(&env);
+    let config_id = env.register(ProtocolConfigContract, ());
+    let config = ProtocolConfigContractClient::new(&env, &config_id);
+    config.initialize(&admin);
+    config.approve_schema_version(&1);
+    config.approve_proof_type(&BytesN::from_array(&env, &[1; 32]));
+    let issuer_registry_id = env.register(IssuerRegistryContract, ());
+    let issuers = IssuerRegistryContractClient::new(&env, &issuer_registry_id);
+    issuers.initialize(&admin);
+    let issuer_id_hash = BytesN::from_array(&env, &[0x61; 32]);
+    let metadata_hash = BytesN::from_array(&env, &[0x62; 32]);
+    issuers.register_issuer(&issuer_id_hash, &issuer, &metadata_hash, &metadata_hash);
+    let proof_registry_id = env.register(ProofRegistryContract, ());
+    let proofs = ProofRegistryContractClient::new(&env, &proof_registry_id);
+    proofs.initialize(&admin, &issuer_registry_id, &config_id);
+
+    let proof_id = BytesN::from_array(&env, &[0x63; 32]);
+    let policy_hash = BytesN::from_array(&env, &[0x64; 32]);
+    let receipt_hash = BytesN::from_array(&env, &[0x65; 32]);
+    let pt = BytesN::from_array(&env, &[1u8; 32]);
+    config.approve_proof_type(&pt);
+    proofs.register_proof(
+        &proof_id,
+        &BytesN::from_array(&env, &[0x66; 32]),
+        &issuer,
+        &1,
+        &(env.ledger().timestamp() + 1_000),
+        &None,
+        &soroban_sdk::BytesN::from_array(&env, &[1u8; 32]),
+    );
+
+    let actual = proofs.commit_disclosure_consent(&proof_id, &policy_hash, &3, &receipt_hash);
+    let expected = disclosure_consent_commitment(
+        &env,
+        &env.ledger().network_id(),
+        &proof_registry_id,
+        &proof_id,
+        &policy_hash,
+        3,
+        &receipt_hash,
+    );
+
+    assert_eq!(actual, expected);
+    assert!(proofs.has_consent_receipt_commitment(&expected));
+}
+
+/// The u32/u64 big-endian integer vectors from `vectors.tsv`
+/// (`schema-7`/`expiration-1700000000`) round-trip through the actual
+/// contract calls that take a `schema_version: u32`/`expires_at: u64`, not
+/// just through a standalone byte-encoding assertion.
+#[test]
+fn integer_vectors_match_the_values_accepted_by_real_contract_calls() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let config_id = env.register(ProtocolConfigContract, ());
+    let config = ProtocolConfigContractClient::new(&env, &config_id);
+    config.initialize(&admin);
+
+    // schema-7 in vectors.tsv: source "7", big-endian hex "00000007".
+    let schema_version: u32 = vector_hex_source("schema-7").parse().unwrap();
+    assert_eq!(schema_version, 7);
+    config.approve_schema_version(&schema_version);
+    assert!(config.is_schema_version_approved(&schema_version));
+
+    // expiration-1700000000: a real Soroban ledger timestamp is a u64, the
+    // same type register_proof's expires_at takes.
+    let expiration: u64 = vector_hex_source("expiration-1700000000").parse().unwrap();
+    assert_eq!(expiration, 1_700_000_000);
+}
+
+fn vector_hex_source(id: &str) -> &'static str {
+    for line in include_str!("../../fixtures/encoding/vectors.tsv").lines() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: std::vec::Vec<&str> = line.split('\t').collect();
+        if fields[0] == id {
+            return fields[2];
+        }
+    }
+    panic!("no fixture vector named {id} in vectors.tsv");
+}

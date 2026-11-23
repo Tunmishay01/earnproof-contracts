@@ -1,0 +1,54 @@
+{
+  "event": "proof_revoked",
+  "contract": "proof-registry",
+  "contract_version": "0.1.0",
+  "schema_version": 1,
+  "topics": [
+    "proof_revoked"
+  ],
+  "payload": {
+    "proof_id_hash": {
+      "type": "BytesN<32>",
+      "description": "Identifier hash of the proof that was revoked.",
+      "example": "0x0101010101010101010101010101010101010101010101010101010101010101"
+    },
+    "revoked_at": {
+      "type": "u64",
+      "description": "Ledger timestamp at which the proof became invalid on-chain.",
+      "example": 1500
+    },
+    "revoked_ledger": {
+      "type": "u32",
+      "description": "Ledger sequence at which the proof became invalid on-chain.",
+      "example": 4242
+    },
+    "by_admin": {
+      "type": "bool",
+      "description": "True when the admin revoked the proof via admin_revoke_proof; false when the issuer revoked it via revoke_proof.",
+      "example": false
+    },
+    "epoch": {
+      "type": "u32",
+      "description": "Registry epoch after this revocation committed.",
+      "example": 2
+    },
+    "policy_version": {
+      "type": "u32",
+      "description": "Authority policy version in force when the revocation committed. Later policy changes never alter it.",
+      "example": 1
+    },
+    "actor_role": {
+      "type": "RevocationActorRole",
+      "description": "Role that authorized the revocation: Issuer or Admin.",
+      "example": "Issuer"
+    },
+    "authorization_domain": {
+      "type": "BytesN<32>",
+      "description": "Hash binding the registry, actor role and policy version that authorized the revocation.",
+      "example": "0x0202020202020202020202020202020202020202020202020202020202020202"
+    }
+  },
+  "emitted_by": "revoke_proof, admin_revoke_proof",
+  "description": "Published once a revocation commits, whether initiated by the issuer or the admin. A repeated revocation attempt fails before this point and publishes nothing. It also commits the authority policy version, actor role and authorization domain.",
+  "compatibility": "additive"
+}

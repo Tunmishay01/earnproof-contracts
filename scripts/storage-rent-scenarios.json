@@ -1,0 +1,66 @@
+{
+  "model_version": 1,
+  "toolchain": {
+    "rust": "1.98.0",
+    "soroban_sdk": "27.0.0",
+    "generator": "python>=3.11"
+  },
+  "ttl_ledgers": 500000,
+  "entry_types": {
+    "contract_instance": {
+      "encoded_bytes": 2048,
+      "durability": "instance"
+    },
+    "issuer_record": {
+      "encoded_bytes": 512,
+      "durability": "persistent"
+    },
+    "issuer_address_index": {
+      "encoded_bytes": 160,
+      "durability": "persistent"
+    },
+    "proof_record": {
+      "encoded_bytes": 640,
+      "durability": "persistent"
+    },
+    "schema_policy": {
+      "encoded_bytes": 384,
+      "durability": "persistent"
+    }
+  },
+  "scenarios": [
+    {
+      "name": "baseline",
+      "description": "Current small production cohort",
+      "counts": {
+        "contract_instance": 3,
+        "issuer_record": 100,
+        "issuer_address_index": 100,
+        "proof_record": 10000,
+        "schema_policy": 25
+      }
+    },
+    {
+      "name": "next_release",
+      "description": "Expected state after one release cycle",
+      "counts": {
+        "contract_instance": 3,
+        "issuer_record": 250,
+        "issuer_address_index": 250,
+        "proof_record": 50000,
+        "schema_policy": 50
+      }
+    },
+    {
+      "name": "stress_projection",
+      "description": "Capacity-planning bound, not an enforced limit",
+      "counts": {
+        "contract_instance": 3,
+        "issuer_record": 1000,
+        "issuer_address_index": 1000,
+        "proof_record": 250000,
+        "schema_policy": 100
+      }
+    }
+  ]
+}

@@ -1,0 +1,1009 @@
+# Contract Error Catalog
+
+Every error these contracts can return, with a stable code, the condition that produces it, whether retrying can help, and what to do about it.
+
+The catalog below is generated from [`packages/shared/src/error_catalog.rs`](../packages/shared/src/error_catalog.rs) and checked by [`tests/error-catalog/`](../tests/error-catalog/src/lib.rs). It is not maintained by hand: to change it, change the catalog and regenerate with
+
+```
+cargo test -p error-catalog-tests -- --ignored regenerate
+```
+
+Backend mapping guidance, including how to handle a code this document does not list, is in [Backend Integration](./backend-integration.md).
+
+---
+
+## How to read this
+
+**Code** is the contract. Clients switch on the number, never on the variant name. A published code is never renumbered and never reused for a different meaning; removing one is a breaking change, adding one is not.
+
+**Domain** is the allocated range the code falls in:
+
+| Range | Domain | Enum |
+|---|---|---|
+| 1-99 | common | `ContractError` |
+| 100-199 | protocol-config | `ProtocolConfigError` |
+| 200-299 | issuer-registry | `IssuerError` |
+| 300-399 | proof-registry | `ProofError` |
+
+The protocol-config range holds the commitment hash algorithm registry errors (100-105). Every other protocol-config failure still returns a common error.
+
+**Status** distinguishes a code that some contract path actually returns from one that is declared and reserved but produced by nothing in this release. Eight codes are currently reserved, and the distinction matters in practice: see the ambiguity note below before writing a client that waits for one of them.
+
+**Retry** answers whether repeating the call can ever succeed:
+
+| Retry | Meaning | What a client should do |
+|---|---|---|
+| `never` | Deterministic rejection | Surface it. Do not retry, on any schedule. |
+| `after-operator-action` | Succeeds once an operator or admin changes protocol state | Queue or poll the relevant read (`is_paused`, `is_active_address`, `is_schema_version_approved`) rather than retrying the write blindly. |
+| `after-caller-change` | Succeeds if the request itself changes | Fix the request. Retrying it unchanged fails identically. |
+
+An unrecognised code is always `never`. A client that has not seen a code cannot know whether the call had a side effect, so replaying it is never safe.
+
+---
+
+## Overloaded codes in this release
+
+The following codes are now properly separated (no longer overloaded):
+
+**Previously (pre-fix):** Three conditions shared code `304 InvalidSchemaVersion`:
+1. the schema version is zero;
+2. the protocol is paused;
+3. the issuer address is not active.
+
+**Currently (post-fix):** Each precondition has its distinct code:
+
+| Code | Condition | Retry | Recovery |
+|------|-----------|-------|----------|
+| 304  | schema version is zero | never | Use a non-zero schema version |
+| 307  | protocol is paused | after-operator-action | Poll `is_paused` and wait for unpause |
+| 308  | issuer is inactive | after-operator-action | Call `is_active_address` and wait for reactivation |
+| 309  | schema not approved | after-operator-action | Call `is_schema_version_approved` and wait for approval |
+
+This separation enables clients to distinguish between different failure modes and take appropriate recovery actions, rather than checking all three conditions blindly on receipt of 304.
+
+---
+
+## Disclosure
+
+A Soroban contract error is a type and a number. It carries no message, no payload, and no record content, so a failing call cannot leak what it touched. Three properties follow, each asserted in the test crate:
+
+- **Authorization failures are undifferentiated.** Every authorization rejection is the same outcome regardless of which address would have been accepted, and none reveals whether a record exists.
+- **Client messages are fixed strings.** No entry contains an interpolation marker, so a client is never invited to splice an identifier into a message the contract did not provide.
+- **No message names private data.** The on-chain record set is public by design, so a `not found` code is not a disclosure; the constraint is that the client-facing surface never grows toward commitment contents, metadata, or amounts, none of which are on-chain at all. See the [Storage Model](./storage-model.md) for the full on-chain data boundary.
+
+---
+
+<!-- BEGIN GENERATED: do not edit. -->
+
+## Catalog
+
+| Code | Name | Enum | Domain | Status | Retry | HTTP |
+|---|---|---|---|---|---|---|
+| 1 | `AlreadyInitialized` | `ContractError` | common | returned | never | 409 |
+| 2 | `NotInitialized` | `ContractError` | common | returned | after-operator-action | 500 |
+| 20 | `Unauthorized` | `ContractError` | common | reserved | never | 403 |
+| 40 | `AlreadyExists` | `ContractError` | common | reserved | never | 409 |
+| 41 | `NotFound` | `ContractError` | common | reserved | after-caller-change | 404 |
+| 42 | `InvalidState` | `ContractError` | common | reserved | never | 400 |
+| 60 | `InvalidInput` | `ContractError` | common | returned | after-caller-change | 400 |
+| 61 | `InvalidAddress` | `ContractError` | common | returned | after-caller-change | 400 |
+| 62 | `IncompatibleInterfaceVersion` | `ContractError` | common | returned | after-caller-change | 400 |
+| 63 | `AdminNominationExpired` | `ContractError` | common | returned | after-operator-action | 409 |
+| 64 | `BatchTooLarge` | `ContractError` | common | returned | after-caller-change | 400 |
+| 65 | `DeploymentIdentityMismatch` | `ContractError` | common | returned | after-operator-action | 409 |
+| 80 | `ProtocolPaused` | `ContractError` | common | reserved | after-operator-action | 503 |
+| 90 | `NoUpgradeApproval` | `ContractError` | common | returned | after-operator-action | 412 |
+| 91 | `UpgradeTimelockNotElapsed` | `ContractError` | common | returned | after-operator-action | 409 |
+| 92 | `UpgradeApprovalExpired` | `ContractError` | common | returned | after-operator-action | 409 |
+| 93 | `WasmHashMismatch` | `ContractError` | common | returned | after-caller-change | 400 |
+| 94 | `InvalidTimingConfig` | `ContractError` | common | returned | after-caller-change | 400 |
+| 95 | `ThresholdApprovalRequired` | `ContractError` | common | returned | after-operator-action | 412 |
+| 96 | `ApprovalProposalNotFound` | `ContractError` | common | returned | after-caller-change | 404 |
+| 97 | `ApprovalProposalExpired` | `ContractError` | common | returned | after-operator-action | 409 |
+| 98 | `InsufficientApprovals` | `ContractError` | common | returned | after-operator-action | 412 |
+| 99 | `InvalidApprovalPolicy` | `ContractError` | common | returned | after-caller-change | 400 |
+| 100 | `HashAlgorithmNotFound` | `ProtocolConfigError` | protocol-config | returned | after-caller-change | 404 |
+| 101 | `InvalidHashAlgorithmTransition` | `ProtocolConfigError` | protocol-config | returned | never | 409 |
+| 102 | `HashAlgorithmDeprecated` | `ProtocolConfigError` | protocol-config | returned | after-caller-change | 400 |
+| 103 | `InvalidHashAlgorithmId` | `ProtocolConfigError` | protocol-config | returned | after-caller-change | 400 |
+| 104 | `HashAlgorithmNotActive` | `ProtocolConfigError` | protocol-config | returned | after-operator-action | 409 |
+| 105 | `RegistryUnavailable` | `ProtocolConfigError` | protocol-config | returned | after-operator-action | 503 |
+| 200 | `IssuerAlreadyRegistered` | `IssuerError` | issuer-registry | returned | never | 409 |
+| 201 | `IssuerNotFound` | `IssuerError` | issuer-registry | returned | after-caller-change | 404 |
+| 202 | `IssuerAddressAlreadyRegistered` | `IssuerError` | issuer-registry | returned | never | 409 |
+| 203 | `IssuerAddressNotFound` | `IssuerError` | issuer-registry | returned | after-caller-change | 404 |
+| 204 | `IssuerRevoked` | `IssuerError` | issuer-registry | returned | never | 403 |
+| 205 | `IssuerInactive` | `IssuerError` | issuer-registry | reserved | after-operator-action | 403 |
+| 206 | `InvalidTransition` | `IssuerError` | issuer-registry | returned | never | 400 |
+| 207 | `InvalidAddress` | `IssuerError` | issuer-registry | returned | after-caller-change | 400 |
+| 208 | `IssuerCapacityExceeded` | `IssuerError` | issuer-registry | returned | after-operator-action | 409 |
+| 209 | `MaxBelowActiveUsage` | `IssuerError` | issuer-registry | returned | after-caller-change | 400 |
+| 210 | `ReactivationCooldownActive` | `IssuerError` | issuer-registry | returned | after-caller-change | 400 |
+| 211 | `InvalidMetadataCommitment` | `IssuerError` | issuer-registry | returned | after-caller-change | 400 |
+| 212 | `BatchTooLarge` | `IssuerError` | issuer-registry | returned | after-caller-change | 400 |
+| 213 | `InvalidAssuranceLevel` | `IssuerError` | issuer-registry | returned | after-caller-change | 400 |
+| 214 | `SequenceOverflow` | `IssuerError` | issuer-registry | returned | after-operator-action | 409 |
+| 300 | `ProofAlreadyRegistered` | `ProofError` | proof-registry | returned | never | 409 |
+| 301 | `ProofNotFound` | `ProofError` | proof-registry | returned | after-caller-change | 404 |
+| 302 | `ProofAlreadyRevoked` | `ProofError` | proof-registry | returned | never | 400 |
+| 303 | `ProofExpired` | `ProofError` | proof-registry | returned | after-caller-change | 400 |
+| 304 | `InvalidSchemaVersion` | `ProofError` | proof-registry | returned | after-caller-change | 400 |
+| 305 | `SchemaVersionNotApproved` | `ProofError` | proof-registry | reserved | after-operator-action | 400 |
+| 306 | `InvalidAddress` | `ProofError` | proof-registry | returned | after-caller-change | 400 |
+| 307 | `ContractPaused` | `ProofError` | proof-registry | returned | after-operator-action | 503 |
+| 308 | `IssuerInactive` | `ProofError` | proof-registry | returned | after-operator-action | 403 |
+| 309 | `UnsupportedSchema` | `ProofError` | proof-registry | returned | after-operator-action | 400 |
+| 310 | `MalformedInput` | `ProofError` | proof-registry | returned | after-caller-change | 400 |
+| 311 | `InvalidBatchSize` | `ProofError` | proof-registry | returned | after-caller-change | 400 |
+| 312 | `InvalidActivationTime` | `ProofError` | proof-registry | returned | after-caller-change | 400 |
+| 313 | `DisputeAlreadyOpen` | `ProofError` | proof-registry | returned | never | 409 |
+| 314 | `DisputeNotFound` | `ProofError` | proof-registry | returned | after-caller-change | 404 |
+| 315 | `DisputeNotOpen` | `ProofError` | proof-registry | returned | never | 400 |
+| 316 | `UnsupportedProofType` | `ProofError` | proof-registry | returned | after-operator-action | 400 |
+| 317 | `InvalidProofContext` | `ProofError` | proof-registry | reserved | after-caller-change | 400 |
+| 318 | `ProofCapacityReached` | `ProofError` | proof-registry | reserved | after-operator-action | 409 |
+| 319 | `ProofAccountingUnavailable` | `ProofError` | proof-registry | reserved | after-operator-action | 503 |
+| 320 | `ProofCountOverflow` | `ProofError` | proof-registry | reserved | after-operator-action | 503 |
+| 321 | `CyclicSupersession` | `ProofError` | proof-registry | returned | never | 400 |
+| 322 | `CrossIssuerSupersession` | `ProofError` | proof-registry | returned | never | 403 |
+| 323 | `PredecessorNotFound` | `ProofError` | proof-registry | returned | after-caller-change | 404 |
+| 324 | `TooManySuccessors` | `ProofError` | proof-registry | returned | never | 400 |
+| 325 | `DisputeFilingWindowClosed` | `ProofError` | proof-registry | returned | never | 400 |
+| 326 | `UnsupportedNullifierDomain` | `ProofError` | proof-registry | returned | after-operator-action | 400 |
+| 327 | `ConsentReceiptAlreadyCommitted` | `ProofError` | proof-registry | returned | never | 409 |
+| 328 | `ConsentAlreadyWithdrawn` | `ProofError` | proof-registry | returned | never | 409 |
+| 329 | `ConsentWithdrawn` | `ProofError` | proof-registry | returned | never | 409 |
+| 330 | `StaleConsentWithdrawalSequence` | `ProofError` | proof-registry | returned | after-caller-change | 409 |
+| 331 | `InvalidConsentWithdrawalReason` | `ProofError` | proof-registry | returned | never | 400 |
+| 332 | `UnsupportedEventDomain` | `ProofError` | proof-registry | returned | never | 400 |
+
+## Details
+
+### 1 - `AlreadyInitialized`
+
+- Enum: `ContractError`
+- Domain: common
+- Status: returned
+- Retry: never
+- Cause: initialize was called on a contract that already has an admin.
+- Remediation: Treat the deployment as already provisioned. Verify the recorded admin before assuming the deployment is the one you expected.
+- Suggested HTTP status: 409
+- Client message: "Contract is already initialized"
+
+### 2 - `NotInitialized`
+
+- Enum: `ContractError`
+- Domain: common
+- Status: returned
+- Retry: after-operator-action
+- Cause: A call read instance state on a contract that was never initialized.
+- Remediation: Initialize the contract, or point the client at the correct deployed address. Do not retry against the same uninitialized contract.
+- Suggested HTTP status: 500
+- Client message: "Service temporarily unavailable"
+
+### 20 - `Unauthorized`
+
+- Enum: `ContractError`
+- Domain: common
+- Status: reserved
+- Retry: never
+- Cause: Reserved for an explicit authorization rejection. The contracts currently enforce authorization through require_auth, which aborts the invocation with a host authorization error rather than returning this code.
+- Remediation: Sign with the address the operation requires. Clients must treat a host authorization abort and this code as the same outcome, and neither reveals which address would have been accepted.
+- Suggested HTTP status: 403
+- Client message: "Insufficient permissions"
+
+### 40 - `AlreadyExists`
+
+- Enum: `ContractError`
+- Domain: common
+- Status: reserved
+- Retry: never
+- Cause: Reserved for a generic duplicate-write rejection. The registries return their own specific codes instead: 200, 202, and 300.
+- Remediation: Read the existing record instead of rewriting it. Handle the specific codes 200, 202, and 300, and treat this one as a forward-compatible synonym.
+- Suggested HTTP status: 409
+- Client message: "Resource already exists"
+
+### 41 - `NotFound`
+
+- Enum: `ContractError`
+- Domain: common
+- Status: reserved
+- Retry: after-caller-change
+- Cause: Reserved for a generic missing-record rejection. The registries return their own specific codes instead: 201, 203, and 301.
+- Remediation: Confirm the identifier hash was derived with the documented hashing rules. Handle the specific codes 201, 203, and 301, and treat this one as a forward-compatible synonym.
+- Suggested HTTP status: 404
+- Client message: "Resource not found"
+
+### 42 - `InvalidState`
+
+- Enum: `ContractError`
+- Domain: common
+- Status: reserved
+- Retry: never
+- Cause: Reserved for a generic lifecycle rejection. The issuer registry returns 204 and 206 instead, and the proof registry returns 302.
+- Remediation: Read the current status and choose an operation the lifecycle allows. Handle the specific codes 204, 206, and 302, and treat this one as a forward-compatible synonym.
+- Suggested HTTP status: 400
+- Client message: "Operation not permitted in current state"
+
+### 60 - `InvalidInput`
+
+- Enum: `ContractError`
+- Domain: common
+- Status: returned
+- Retry: after-caller-change
+- Cause: An argument failed validation, such as a zero schema version.
+- Remediation: Correct the argument. Retrying the identical request will fail identically.
+- Suggested HTTP status: 400
+- Client message: "Invalid input provided"
+
+### 61 - `InvalidAddress`
+
+- Enum: `ContractError`
+- Domain: common
+- Status: returned
+- Retry: after-caller-change
+- Cause: A supplied address is not a valid non-sentinel account or contract address.
+- Remediation: Supply a canonical Stellar account or contract address that is not reserved as a sentinel.
+- Suggested HTTP status: 400
+- Client message: "Invalid address"
+
+### 62 - `IncompatibleInterfaceVersion`
+
+- Enum: `ContractError`
+- Domain: common
+- Status: returned
+- Retry: after-caller-change
+- Cause: A cross-contract dependency reported an interface version outside the range the consumer accepts, during initialization or a governed dependency replacement.
+- Remediation: Bind a dependency whose interface version is compatible: same major and at least the minor and patch the consumer requires. Read the accepted version from the consumer before retrying.
+- Suggested HTTP status: 400
+- Client message: "Incompatible dependency version"
+
+### 63 - `AdminNominationExpired`
+
+- Enum: `ContractError`
+- Domain: common
+- Status: returned
+- Retry: after-operator-action
+- Cause: An administrator transfer was accepted at or after its exclusive expiry ledger, or a legacy nomination has no expiry metadata.
+- Remediation: Have the current administrator create a fresh nomination, then accept it before the reported expiry ledger.
+- Suggested HTTP status: 409
+- Client message: "Administrator nomination has expired"
+
+### 64 - `BatchTooLarge`
+
+- Enum: `ContractError`
+- Domain: common
+- Status: returned
+- Retry: after-caller-change
+- Cause: get_schema_statuses was given more schema versions than the bounded batch limit.
+- Remediation: Split the request into batches of at most MAX_SCHEMA_STATUS_BATCH entries.
+- Suggested HTTP status: 400
+- Client message: "Request batch is too large"
+
+### 65 - `DeploymentIdentityMismatch`
+
+- Enum: `ContractError`
+- Domain: common
+- Status: returned
+- Retry: after-operator-action
+- Cause: A dependency, or the pinned deployment domain, reports a network or deployment domain different from the consumer's identity.
+- Remediation: Bind a dependency from the same deployment domain, or set the matching domain on the dependency, then retry.
+- Suggested HTTP status: 409
+- Client message: "Dependency belongs to a different deployment"
+
+### 80 - `ProtocolPaused`
+
+- Enum: `ContractError`
+- Domain: common
+- Status: reserved
+- Retry: after-operator-action
+- Cause: Reserved for the pause rejection. A paused protocol is currently reported by the proof registry as 304, not as this code.
+- Remediation: Poll is_paused rather than waiting for this code: a paused protocol surfaces as 304 in the current release. Treat both as the same operator-action outcome.
+- Suggested HTTP status: 503
+- Client message: "Service temporarily paused"
+
+### 90 - `NoUpgradeApproval`
+
+- Enum: `ContractError`
+- Domain: common
+- Status: returned
+- Retry: after-operator-action
+- Cause: An upgrade was attempted without a recorded approval.
+- Remediation: Have the authorized admin approve the target WASM and version before retrying.
+- Suggested HTTP status: 412
+- Client message: "No upgrade approval was found"
+
+### 91 - `UpgradeTimelockNotElapsed`
+
+- Enum: `ContractError`
+- Domain: common
+- Status: returned
+- Retry: after-operator-action
+- Cause: The approved upgrade was attempted before its earliest execution ledger.
+- Remediation: Wait until the approval's earliest execution ledger, then retry with the approved hash and version.
+- Suggested HTTP status: 409
+- Client message: "Upgrade timelock has not elapsed"
+
+### 92 - `UpgradeApprovalExpired`
+
+- Enum: `ContractError`
+- Domain: common
+- Status: returned
+- Retry: after-operator-action
+- Cause: The approved upgrade was attempted at or after its expiration ledger.
+- Remediation: Request a fresh upgrade approval and retry within its execution window.
+- Suggested HTTP status: 409
+- Client message: "Upgrade approval has expired"
+
+### 93 - `WasmHashMismatch`
+
+- Enum: `ContractError`
+- Domain: common
+- Status: returned
+- Retry: after-caller-change
+- Cause: The upgrade supplied a WASM hash different from the approved hash.
+- Remediation: Install the exact WASM artifact whose hash was approved, or obtain approval for the intended artifact.
+- Suggested HTTP status: 400
+- Client message: "WASM hash does not match approval"
+
+### 94 - `InvalidTimingConfig`
+
+- Enum: `ContractError`
+- Domain: common
+- Status: returned
+- Retry: after-caller-change
+- Cause: An upgrade or governance timing configuration has inconsistent or invalid ledger bounds.
+- Remediation: Choose valid timing values whose activation and expiry bounds are ordered and representable.
+- Suggested HTTP status: 400
+- Client message: "Invalid timing configuration"
+
+### 95 - `ThresholdApprovalRequired`
+
+- Enum: `ContractError`
+- Domain: common
+- Status: reserved
+- Retry: after-operator-action
+- Cause: A critical action requires a threshold-approved proposal instead of direct execution.
+- Remediation: Create a proposal for the canonical action, collect the configured signer threshold, and execute that proposal.
+- Suggested HTTP status: 412
+- Client message: "Threshold approval is required"
+
+### 96 - `ApprovalProposalNotFound`
+
+- Enum: `ContractError`
+- Domain: common
+- Status: reserved
+- Retry: after-caller-change
+- Cause: The requested critical-action proposal does not exist or has already been consumed.
+- Remediation: Use an existing proposal identifier for this contract, or create a new proposal.
+- Suggested HTTP status: 404
+- Client message: "Approval proposal not found"
+
+### 97 - `ApprovalProposalExpired`
+
+- Enum: `ContractError`
+- Domain: common
+- Status: reserved
+- Retry: after-operator-action
+- Cause: The critical-action proposal reached its expiry ledger before execution.
+- Remediation: Create a new proposal and collect approvals again.
+- Suggested HTTP status: 409
+- Client message: "Approval proposal has expired"
+
+### 98 - `InsufficientApprovals`
+
+- Enum: `ContractError`
+- Domain: common
+- Status: reserved
+- Retry: after-operator-action
+- Cause: The proposal has fewer unique authorized signer approvals than its policy threshold.
+- Remediation: Collect approvals from additional configured signers before execution.
+- Suggested HTTP status: 412
+- Client message: "Approval threshold has not been reached"
+
+### 99 - `InvalidApprovalPolicy`
+
+- Enum: `ContractError`
+- Domain: common
+- Status: reserved
+- Retry: after-caller-change
+- Cause: The approval policy has an invalid threshold, signer count, or duplicate signer.
+- Remediation: Configure a non-empty unique signer set with a threshold between one and the signer count.
+- Suggested HTTP status: 400
+- Client message: "Invalid approval policy"
+
+### 100 - `HashAlgorithmNotFound`
+
+- Enum: `ProtocolConfigError`
+- Domain: protocol-config
+- Status: returned
+- Retry: after-caller-change
+- Cause: No commitment hash algorithm is registered under the supplied identifier.
+- Remediation: Use an identifier returned by the algorithm registry, or ask governance to approve it first.
+- Suggested HTTP status: 404
+- Client message: "Hash algorithm not found"
+
+### 101 - `InvalidHashAlgorithmTransition`
+
+- Enum: `ProtocolConfigError`
+- Domain: protocol-config
+- Status: returned
+- Retry: never
+- Cause: The lifecycle step is not allowed from the algorithm current status, or the identifier is already registered.
+- Remediation: Read the algorithm record and request only the next valid step: approve, then activate, then deprecate.
+- Suggested HTTP status: 409
+- Client message: "Invalid hash algorithm transition"
+
+### 102 - `HashAlgorithmDeprecated`
+
+- Enum: `ProtocolConfigError`
+- Domain: protocol-config
+- Status: returned
+- Retry: after-caller-change
+- Cause: A new commitment was requested with a deprecated hash algorithm. Deprecated algorithms stay verifiable but cannot create commitments.
+- Remediation: Create the commitment with an active algorithm. Verification of existing commitments is unaffected.
+- Suggested HTTP status: 400
+- Client message: "Hash algorithm is deprecated"
+
+### 103 - `InvalidHashAlgorithmId`
+
+- Enum: `ProtocolConfigError`
+- Domain: protocol-config
+- Status: returned
+- Retry: after-caller-change
+- Cause: Hash algorithm identifier zero is reserved and cannot be registered.
+- Remediation: Use a non-zero algorithm identifier.
+- Suggested HTTP status: 400
+- Client message: "Invalid hash algorithm identifier"
+
+### 104 - `HashAlgorithmNotActive`
+
+- Enum: `ProtocolConfigError`
+- Domain: protocol-config
+- Status: returned
+- Retry: after-operator-action
+- Cause: The hash algorithm is approved but governance has not activated it yet.
+- Remediation: Wait for governance to activate the algorithm before creating commitments with it.
+- Suggested HTTP status: 409
+- Client message: "Hash algorithm is not active"
+
+### 105 - `RegistryUnavailable`
+
+- Enum: `ProtocolConfigError`
+- Domain: protocol-config
+- Status: returned
+- Retry: after-operator-action
+- Cause: The contract has no administrator or has been decommissioned, so the algorithm registry cannot change.
+- Remediation: Initialize the contract, or use the successor deployment if this one is decommissioned.
+- Suggested HTTP status: 503
+- Client message: "Registry unavailable"
+
+### 200 - `IssuerAlreadyRegistered`
+
+- Enum: `IssuerError`
+- Domain: issuer-registry
+- Status: returned
+- Retry: never
+- Cause: register_issuer was called with an issuer_id_hash that already has a record.
+- Remediation: Use update_issuer to change metadata, or rotate_issuer_address to change the address. Registration is one-time per identifier.
+- Suggested HTTP status: 409
+- Client message: "Issuer already registered"
+
+### 201 - `IssuerNotFound`
+
+- Enum: `IssuerError`
+- Domain: issuer-registry
+- Status: returned
+- Retry: after-caller-change
+- Cause: A call referenced an issuer_id_hash with no record, or the registry has no admin yet.
+- Remediation: Register the issuer first, or confirm the identifier hash. If the registry is uninitialized, every call returns this code until an admin is set.
+- Suggested HTTP status: 404
+- Client message: "Issuer not found"
+
+### 202 - `IssuerAddressAlreadyRegistered`
+
+- Enum: `IssuerError`
+- Domain: issuer-registry
+- Status: returned
+- Retry: never
+- Cause: A registration or rotation targeted a Stellar address already bound to an issuer.
+- Remediation: Choose an unused address. An address maps to at most one issuer so that address-based lookups stay unambiguous.
+- Suggested HTTP status: 409
+- Client message: "Issuer address already registered"
+
+### 203 - `IssuerAddressNotFound`
+
+- Enum: `IssuerError`
+- Domain: issuer-registry
+- Status: returned
+- Retry: after-caller-change
+- Cause: An address lookup found no entry in the reverse index.
+- Remediation: The address is not a registered issuer. Note that a rotated-away address returns this code, because the old index entry is removed.
+- Suggested HTTP status: 404
+- Client message: "Issuer address not found"
+
+### 204 - `IssuerRevoked`
+
+- Enum: `IssuerError`
+- Domain: issuer-registry
+- Status: returned
+- Retry: never
+- Cause: The operation targeted an issuer whose status is Revoked.
+- Remediation: Revocation is terminal. Register a new issuer identifier if the party is to be readmitted.
+- Suggested HTTP status: 403
+- Client message: "Issuer has been revoked"
+
+### 205 - `IssuerInactive`
+
+- Enum: `IssuerError`
+- Domain: issuer-registry
+- Status: reserved
+- Retry: after-operator-action
+- Cause: Reserved for the suspended-issuer rejection. A suspended issuer is currently reported by the proof registry as 304, not as this code.
+- Remediation: Call is_active_address before registering rather than waiting for this code: a suspended issuer surfaces as 304 in the current release. An admin must reactivate the issuer; suspension is reversible, revocation is not.
+- Suggested HTTP status: 403
+- Client message: "Issuer is not active"
+
+### 206 - `InvalidTransition`
+
+- Enum: `IssuerError`
+- Domain: issuer-registry
+- Status: returned
+- Retry: never
+- Cause: A status change was requested that the lifecycle does not allow, such as reactivating a revoked issuer.
+- Remediation: Read the current status and choose a permitted transition.
+- Suggested HTTP status: 400
+- Client message: "Invalid status transition"
+
+### 207 - `InvalidAddress`
+
+- Enum: `IssuerError`
+- Domain: issuer-registry
+- Status: returned
+- Retry: after-caller-change
+- Cause: Issuer registration, rotation, or lifecycle input contains an invalid address or reserved empty commitment.
+- Remediation: Supply a canonical issuer address and nonzero commitment values required by the selected operation.
+- Suggested HTTP status: 400
+- Client message: "Invalid issuer address or input"
+
+### 208 - `IssuerCapacityExceeded`
+
+- Enum: `IssuerError`
+- Domain: issuer-registry
+- Status: returned
+- Retry: after-operator-action
+- Cause: register_issuer or reactivate_issuer would push the active-issuer count above the governed maximum capacity.
+- Remediation: Wait for an issuer to be suspended or revoked, or have an admin raise the maximum active-issuer capacity. Read get_active_issuer_count and get_max_active_issuers to see the headroom.
+- Suggested HTTP status: 409
+- Client message: "Issuer capacity reached"
+
+### 209 - `MaxBelowActiveUsage`
+
+- Enum: `IssuerError`
+- Domain: issuer-registry
+- Status: returned
+- Retry: after-caller-change
+- Cause: set_max_active_issuers was asked to set a limit below the current active-issuer count without the explicit below-usage override.
+- Remediation: Pass a limit at or above the current active count, or set the override flag to ratchet the ceiling down deliberately. Retrying the identical request will fail identically.
+- Suggested HTTP status: 400
+- Client message: "Capacity limit below current usage"
+
+### 210 - `ReactivationCooldownActive`
+
+- Enum: `IssuerError`
+- Domain: issuer-registry
+- Status: returned
+- Retry: after-caller-change
+- Cause: reactivate_issuer was called before the suspended issuer's reactivation cooldown had elapsed.
+- Remediation: Wait until the ledger time returned by get_earliest_reactivation before retrying. The deadline is fixed at suspension time and does not move.
+- Suggested HTTP status: 400
+- Client message: "Reactivation cooldown has not elapsed"
+
+### 211 - `InvalidMetadataCommitment`
+
+- Enum: `IssuerError`
+- Domain: issuer-registry
+- Status: returned
+- Retry: after-caller-change
+- Cause: set_issuer_metadata_commitment was called with the all-zero digest for the content hash or the URI hash, which is reserved as the "no URI commitment recorded" sentinel.
+- Remediation: Compute a real SHA-256 commitment over the canonical document or URI bytes and resubmit; the all-zero digest is never accepted.
+- Suggested HTTP status: 400
+- Client message: "Invalid identity digest"
+
+### 212 - `BatchTooLarge`
+
+- Enum: `IssuerError`
+- Domain: issuer-registry
+- Status: returned
+- Retry: after-caller-change
+- Cause: get_issuer_statuses was given more issuer identifiers than the bounded batch limit.
+- Remediation: Split the request into batches of at most MAX_ISSUER_STATUS_BATCH entries.
+- Suggested HTTP status: 400
+- Client message: "Request batch is too large"
+
+### 213 - `InvalidAssuranceLevel`
+
+- Enum: `IssuerError`
+- Domain: issuer-registry
+- Status: returned
+- Retry: after-caller-change
+- Cause: An issuer assurance change used an unsupported commitment version or a tier outside the documented 1-255 range.
+- Remediation: Use commitment version 1 and a public assurance tier from 1 through 255.
+- Suggested HTTP status: 400
+- Client message: "Invalid issuer assurance level"
+
+### 214 - `SequenceOverflow`
+
+- Enum: `IssuerError`
+- Domain: issuer-registry
+- Status: returned
+- Retry: after-operator-action
+- Cause: A per-issuer monotonic sequence reached its maximum value and cannot advance.
+- Remediation: Do not retry the transition unchanged. Governance must migrate the sequence representation before another lifecycle change.
+- Suggested HTTP status: 409
+- Client message: "Issuer sequence cannot advance"
+
+### 300 - `ProofAlreadyRegistered`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: never
+- Cause: register_proof was called with a proof_id_hash that already has a record.
+- Remediation: Proof records are immutable once written, including after archival and restoration. Register a new identifier rather than replacing a commitment.
+- Suggested HTTP status: 409
+- Client message: "Proof already registered"
+
+### 301 - `ProofNotFound`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: after-caller-change
+- Cause: A call referenced a proof_id_hash with no record, or the proof registry has no instance state to read its dependencies from.
+- Remediation: Confirm the identifier hash. If register_proof returns this code, the registry itself is uninitialized and no write took place.
+- Suggested HTTP status: 404
+- Client message: "Proof not found"
+
+### 302 - `ProofAlreadyRevoked`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: never
+- Cause: A revocation targeted a proof already in the Revoked state.
+- Remediation: Treat the revocation as complete. Revocation is terminal and idempotent in effect, though not in return value.
+- Suggested HTTP status: 400
+- Client message: "Proof already revoked"
+
+### 303 - `ProofExpired`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: after-caller-change
+- Cause: register_proof was given an expires_at at or before the current ledger timestamp.
+- Remediation: Send an expiration in the future relative to ledger time, not to wall-clock time on the calling host.
+- Suggested HTTP status: 400
+- Client message: "Invalid proof expiration"
+
+### 304 - `InvalidSchemaVersion`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: after-caller-change
+- Cause: register_proof was given schema version zero.
+- Remediation: Use a nonzero schema version. Check protocol pause, issuer activity, schema approval, and proof-type approval separately when registration is rejected.
+- Suggested HTTP status: 400
+- Client message: "Invalid schema version"
+
+### 305 - `SchemaVersionNotApproved`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: reserved
+- Retry: after-operator-action
+- Cause: The schema version is non-zero but is not approved in protocol-config, either because it was never approved or because it was deprecated.
+- Remediation: A protocol operator must approve the version. A registry pointed at an uninitialized protocol config also returns UnsupportedSchema (309).
+- Suggested HTTP status: 400
+- Client message: "Schema version not approved"
+
+### 306 - `InvalidAddress`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: after-caller-change
+- Cause: The issuer address is not a valid issuing address for this proof registry.
+- Remediation: Supply an active issuer account address distinct from the proof registry and its configuration dependencies.
+- Suggested HTTP status: 400
+- Client message: "Invalid issuer address"
+
+### 307 - `ContractPaused`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: after-operator-action
+- Cause: The proof registry detected that the protocol is paused and rejected proof registration.
+- Remediation: Call is_paused on the protocol config contract to check if the pause is active. An operator must unpause the protocol to allow proof registration to resume.
+- Suggested HTTP status: 503
+- Client message: "Contract is paused"
+
+### 308 - `IssuerInactive`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: after-operator-action
+- Cause: The issuer address is not active or was suspended.
+- Remediation: Call is_active_address on the issuer registry to confirm the issuer is active. An operator must reactivate the issuer if it was suspended.
+- Suggested HTTP status: 403
+- Client message: "Issuer is not active"
+
+### 309 - `UnsupportedSchema`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: after-operator-action
+- Cause: The proof schema identifier is not supported or not registered in the protocol config.
+- Remediation: Call is_schema_version_approved on the protocol config contract to verify the schema version is approved. An operator must approve the schema version before it can be used for proof registration.
+- Suggested HTTP status: 400
+- Client message: "Schema not supported"
+
+### 310 - `MalformedInput`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: after-caller-change
+- Cause: register_proof_with_payload was given an auxiliary payload larger than the schema's governed limit (protocol-config's get_schema_payload_limit for that version).
+- Remediation: Call get_schema_payload_limit for the schema version and shrink the payload to fit, or use register_proof without a payload if none is required.
+- Suggested HTTP status: 400
+- Client message: "Malformed proof input"
+
+### 311 - `InvalidBatchSize`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: after-caller-change
+- Cause: A batch registration or batch revocation call was given zero entries, or more entries than MAX_PROOF_BATCH_SIZE.
+- Remediation: Split the request into batches of between one and MAX_PROOF_BATCH_SIZE entries.
+- Suggested HTTP status: 400
+- Client message: "Invalid batch size"
+
+### 312 - `InvalidActivationTime`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: after-caller-change
+- Cause: register_proof_with_activation was given an activates_at at or after expires_at, so the proof could never be valid.
+- Remediation: Choose an activation time strictly before the expiration.
+- Suggested HTTP status: 400
+- Client message: "Invalid activation time"
+
+### 313 - `DisputeAlreadyOpen`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: never
+- Cause: open_dispute was called for a proof that already has an Open dispute.
+- Remediation: Withdraw, resolve, or reject the existing dispute before opening a new one. Retrying the identical request will not help: the dispute is cleared by a different call (from the disputant or the admin), not by this one succeeding on its own.
+- Suggested HTTP status: 409
+- Client message: "A dispute is already open for this proof"
+
+### 314 - `DisputeNotFound`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: after-caller-change
+- Cause: withdraw_dispute, resolve_dispute, or reject_dispute referenced a proof with no dispute record.
+- Remediation: Open a dispute first, or confirm the proof id.
+- Suggested HTTP status: 404
+- Client message: "No dispute found for this proof"
+
+### 315 - `DisputeNotOpen`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: never
+- Cause: A dispute transition was attempted on a dispute that is not Open (already withdrawn, resolved, or rejected).
+- Remediation: Read the dispute's current status; it is terminal once withdrawn, resolved, or rejected.
+- Suggested HTTP status: 400
+- Client message: "Dispute is not open"
+
+### 316 - `UnsupportedProofType`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: after-operator-action
+- Cause: The proof type identifier is not supported by the protocol config.
+- Remediation: Call is_proof_type_approved on the protocol config contract to verify the proof type is approved. An operator must approve the proof type before it can be used for proof registration.
+- Suggested HTTP status: 400
+- Client message: "Proof type not supported"
+
+### 317 - `InvalidProofContext`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: reserved
+- Retry: after-caller-change
+- Cause: The network passphrase or native/issued asset identifier is not canonical, or the passphrase does not match the ledger network.
+- Remediation: Use the exact active Stellar network passphrase and either Native or a case-sensitive ASCII alphanumeric asset code with a valid account issuer.
+- Suggested HTTP status: 400
+- Client message: "Invalid proof network or asset context"
+
+### 318 - `ProofCapacityReached`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: reserved
+- Retry: after-operator-action
+- Cause: The proof registry has reached its configured capacity.
+- Remediation: An operator must increase the proof capacity or archive eligible proofs before registration can continue.
+- Suggested HTTP status: 409
+- Client message: "Proof registry capacity reached"
+
+### 319 - `ProofAccountingUnavailable`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: reserved
+- Retry: after-operator-action
+- Cause: Stored proof counts are missing or inconsistent, so an accounting operation cannot proceed safely.
+- Remediation: Reconcile proof counts and verify the reported counters before retrying the operation.
+- Suggested HTTP status: 503
+- Client message: "Proof accounting is unavailable"
+
+### 320 - `ProofCountOverflow`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: reserved
+- Retry: after-operator-action
+- Cause: A proof count cannot be incremented without overflowing its storage type.
+- Remediation: Reconcile the proof counters or raise the configured capacity before registering more proofs.
+- Suggested HTTP status: 503
+- Client message: "Proof count limit reached"
+
+### 321 - `CyclicSupersession`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: never
+- Cause: The proof identifier matches its own predecessor or would create a supersession cycle.
+- Remediation: A proof cannot supersede itself or create a cycle. Register the renewal as a forward link from an existing proof.
+- Suggested HTTP status: 400
+- Client message: "Cyclic supersession detected"
+
+### 322 - `CrossIssuerSupersession`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: never
+- Cause: The predecessor proof was registered by a different issuer.
+- Remediation: Cross-issuer supersession is rejected unless protocol policy explicitly supports it.
+- Suggested HTTP status: 403
+- Client message: "Cross-issuer supersession rejected"
+
+### 323 - `PredecessorNotFound`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: after-caller-change
+- Cause: The specified predecessor proof was not found.
+- Remediation: Ensure the predecessor proof exists and remains historically queryable.
+- Suggested HTTP status: 404
+- Client message: "Predecessor proof not found"
+
+### 324 - `TooManySuccessors`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: never
+- Cause: The predecessor proof already has the maximum number of successors.
+- Remediation: A predecessor can only have a bounded number of successors.
+- Suggested HTTP status: 400
+- Client message: "Too many successors"
+
+### 325 - `DisputeFilingWindowClosed`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: reserved
+- Retry: never
+- Cause: The governed dispute filing window has not opened, has closed, or its lifecycle anchor is unavailable.
+- Remediation: Read get_dispute_filing_eligibility before filing and do not replay a request outside its reported half-open window.
+- Suggested HTTP status: 400
+- Client message: "Dispute filing window is closed"
+
+### 326 - `UnsupportedNullifierDomain`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: reserved
+- Retry: after-operator-action
+- Cause: The proof supplied a subject-nullifier domain version that protocol governance does not support.
+- Remediation: Query get_nullifier_domain_versions and submit a nullifier derived under a currently supported version.
+- Suggested HTTP status: 400
+- Client message: "Unsupported nullifier domain version"
+
+### 327 - `ConsentReceiptAlreadyCommitted`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: never
+- Cause: The same disclosure-consent receipt commitment was already recorded for this proof, policy, receipt version, and receipt hash.
+- Remediation: Treat the receipt as already anchored. Query has_consent_receipt_commitment instead of replaying the commit.
+- Suggested HTTP status: 409
+- Client message: "Consent receipt is already committed"
+
+### 328 - `ConsentAlreadyWithdrawn`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: never
+- Cause: Consent for this proof and policy was already withdrawn; a withdrawal is final and recorded once.
+- Remediation: Treat consent as withdrawn. Query is_consent_withdrawn instead of resubmitting.
+- Suggested HTTP status: 409
+- Client message: "Consent is already withdrawn"
+
+### 329 - `ConsentWithdrawn`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: never
+- Cause: A disclosure-consent receipt cannot be committed because consent for this proof and policy was withdrawn.
+- Remediation: Do not anchor new receipts for this pair. A new proof or policy hash is required for fresh consent.
+- Suggested HTTP status: 409
+- Client message: "Consent has been withdrawn"
+
+### 330 - `StaleConsentWithdrawalSequence`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: after-caller-change
+- Cause: The expected withdrawal sequence does not match the next sequence, so the request was replayed or raced by another withdrawal.
+- Remediation: Re-read get_consent_withdrawal_count, then resubmit with the next sequence if the withdrawal is still needed.
+- Suggested HTTP status: 409
+- Client message: "Withdrawal request is out of date"
+
+### 331 - `InvalidConsentWithdrawalReason`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: never
+- Cause: The withdrawal reason code is outside the published version-1 range 1 to 4.
+- Remediation: Use a published reason code. Reason text is never accepted on chain.
+- Suggested HTTP status: 400
+- Client message: "Withdrawal reason is not valid"
+
+### 332 - `UnsupportedEventDomain`
+
+- Enum: `ProofError`
+- Domain: proof-registry
+- Status: returned
+- Retry: never
+- Cause: The contract does not report a sequence range for the requested event domain.
+- Remediation: Query the domain on the contract that emits it: config-change and pause acknowledgements on protocol-config, consent withdrawals on proof-registry.
+- Suggested HTTP status: 400
+- Client message: "Event domain is not supported"
+
+<!-- END GENERATED -->

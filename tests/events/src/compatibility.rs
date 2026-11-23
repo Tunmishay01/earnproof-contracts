@@ -1,0 +1,462 @@
+//! Event topic and payload evolution.
+//!
+//! `tests/event-fixtures/` validates that the JSON fixtures are well-formed.
+//! What it cannot check is whether they still describe the contracts: a fixture
+//! is a static file, and nothing stops the two from drifting apart.
+//!
+//! These tests close that gap by comparing live emissions against the fixtures.
+//! A renamed topic or a dropped payload field fails here, which is what makes
+//! the fixtures usable as a compatibility contract for indexers rather than
+//! documentation that happened to be true once.
+
+use crate::harness::{hash, read_events, Deployment, ObservedEvent};
+use soroban_sdk::testutils::Address as _;
+use soroban_sdk::{Address, BytesN, Env, Symbol, TryFromVal, Val};
+
+/// Every topic the fixtures declare, with the payload fields they promise.
+///
+/// Mirrors `tests/fixtures/events/*/v1/*.json`. Changing either side without
+/// the other fails a test here, which is the point: the fixture is the
+/// published contract and the emission is the implementation.
+const DECLARED_EVENTS: &[(&str, &[&str])] = &[
+    // protocol-config
+    ("initialized", &["admin"]),
+    ("admin_changed", &["new_admin"]),
+    (
+        "admin_transfer_nominated",
+        &["pending_admin", "nominated_by"],
+    ),
+    ("admin_transfer_accepted", &["new_admin"]),
+    (
+        "admin_transfer_cancelled",
+        &["pending_admin", "cancelled_by"],
+    ),
+    (
+        "admin_transfer_expired",
+        &["pending_admin", "expired_at_ledger", "cleaned_at_ledger"],
+    ),
+    ("paused", &["paused"]),
+    ("unpaused", &["paused"]),
+    ("schema_approved", &["version"]),
+    ("schema_deprecated", &["version"]),
+    ("schema_predecessor_set", &["version", "predecessor"]),
+    (
+        "history_retention_set",
+        &[
+            "kind",
+            "previous_max_entries",
+            "max_entries",
+            "revision",
+            "oldest_retained",
+            "changed_by",
+        ],
+    ),
+    (
+        "consent_withdrawn",
+        &[
+            "proof_id_hash",
+            "policy_hash",
+            "sequence",
+            "reason_code",
+            "commitment_hash",
+        ],
+    ),
+    // issuer-registry
+    (
+        "issuer_registered",
+        &[
+            "issuer_id_hash",
+            "issuer_address",
+            "metadata_hash",
+            "metadata_uri_hash",
+            "metadata_revision",
+            "provenance_commitment",
+            "created_at",
+            "epoch",
+        ],
+    ),
+    (
+        "issuer_metadata_updated",
+        &[
+            "issuer_id_hash",
+            "metadata_hash",
+            "metadata_uri_hash",
+            "metadata_revision",
+            "updated_at",
+            "epoch",
+        ],
+    ),
+    (
+        "issuer_suspended",
+        &[
+            "issuer_id_hash",
+            "effective_ledger",
+            "effective_timestamp",
+            "reason_commitment",
+            "updated_at",
+            "epoch",
+        ],
+    ),
+    (
+        "issuer_reactivated",
+        &[
+            "issuer_id_hash",
+            "effective_ledger",
+            "effective_timestamp",
+            "reason_commitment",
+            "updated_at",
+            "epoch",
+        ],
+    ),
+    (
+        "issuer_revoked",
+        &[
+            "issuer_id_hash",
+            "effective_ledger",
+            "effective_timestamp",
+            "reason_commitment",
+            "updated_at",
+            "epoch",
+        ],
+    ),
+    (
+        "issuer_address_rotated",
+        &[
+            "issuer_id_hash",
+            "old_address",
+            "new_address",
+            "updated_at",
+            "epoch",
+        ],
+    ),
+    (
+        "issuer_rotation_nominated",
+        &[
+            "issuer_id_hash",
+            "old_address",
+            "new_address",
+            "expires_at_ledger",
+        ],
+    ),
+    (
+        "issuer_rotation_cancelled",
+        &["issuer_id_hash", "cancelled_by"],
+    ),
+    // proof-registry
+    (
+        "proof_registered",
+        &[
+            "proof_id_hash",
+            "issuer_address",
+            "schema_version",
+            "created_ledger",
+            "created_at",
+            "expires_at",
+            "epoch",
+        ],
+    ),
+    (
+        "proof_registered_with_payload",
+        &[
+            "proof_id_hash",
+            "issuer_address",
+            "schema_version",
+            "created_ledger",
+            "created_at",
+            "expires_at",
+            "payload_len",
+            "payload_hash",
+            "epoch",
+        ],
+    ),
+    (
+        "proof_revoked",
+        &[
+            "proof_id_hash",
+            "revoked_at",
+            "revoked_ledger",
+            "by_admin",
+            "epoch",
+            "policy_version",
+            "actor_role",
+            "authorization_domain",
+        ],
+    ),
+    (
+        "consent_receipt_committed",
+        &[
+            "proof_id_hash",
+            "policy_hash",
+            "receipt_version",
+            "commitment_hash",
+        ],
+    ),
+];
+
+/// Looks up the declared payload fields for a topic.
+fn declared_fields(topic: &str) -> &'static [&'static str] {
+    DECLARED_EVENTS
+        .iter()
+        .find(|(name, _)| *name == topic)
+        .map(|(_, fields)| *fields)
+        .unwrap_or_else(|| {
+            std::panic!(
+                "topic {topic} is emitted but not declared in DECLARED_EVENTS \
+                 or tests/fixtures/events/; an undeclared event is an \
+                 undocumented compatibility surface"
+            )
+        })
+}
+
+/// Asserts an event carries exactly the fields its fixture declares.
+///
+/// Both directions matter. A missing field breaks an indexer that reads it; an
+/// extra one is an undocumented addition that the fixture's `compatibility`
+/// classification has not been updated to describe.
+fn assert_matches_fixture(env: &Env, event: &ObservedEvent) {
+    let topic = event
+        .discriminant(env)
+        .map(|symbol| std::format!("{symbol:?}"))
+        .expect("every event carries a symbol discriminant");
+
+    // The debug rendering is `Symbol(name)`; extract the name.
+    let name: std::string::String = topic
+        .trim_start_matches("Symbol(")
+        .trim_end_matches(')')
+        .into();
+
+    let expected = declared_fields(&name);
+
+    let map: soroban_sdk::Map<Symbol, Val> =
+        soroban_sdk::Map::try_from_val(env, &event.data).expect("payloads are maps");
+
+    assert_eq!(
+        map.len() as usize,
+        expected.len(),
+        "{name}: fixture declares {} payload field(s), contract emitted {}",
+        expected.len(),
+        map.len()
+    );
+
+    for field in expected {
+        assert!(
+            map.get(Symbol::new(env, field)).is_some(),
+            "{name}: fixture declares field {field} but the contract did not emit it"
+        );
+    }
+}
+
+#[test]
+fn protocol_config_events_match_their_fixtures() {
+    let deployment = Deployment::new();
+    let successor = Address::generate(&deployment.env);
+
+    for event in deployment.capture(|| deployment.config.pause()) {
+        assert_matches_fixture(&deployment.env, &event);
+    }
+    for event in deployment.capture(|| deployment.config.unpause()) {
+        assert_matches_fixture(&deployment.env, &event);
+    }
+    for event in deployment.capture(|| deployment.config.approve_schema_version(&4)) {
+        assert_matches_fixture(&deployment.env, &event);
+    }
+    for event in deployment.capture(|| deployment.config.deprecate_schema_version(&4)) {
+        assert_matches_fixture(&deployment.env, &event);
+    }
+    // Schema lineage emits both the predecessor link and schema approval events.
+    for event in deployment.capture(|| deployment.config.approve_schema_with_predecessor(&9, &1)) {
+        assert_matches_fixture(&deployment.env, &event);
+    }
+    // Preserve the two-step administrator handoff and both of its event records.
+    for event in deployment.capture(|| {
+        deployment.config.nominate_admin(&successor);
+        deployment.config.accept_admin()
+    }) {
+        assert_matches_fixture(&deployment.env, &event);
+    }
+}
+
+#[test]
+fn initialization_event_matches_its_fixture() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let contract_id = env.register(protocol_config::ProtocolConfigContract, ());
+    let config = protocol_config::ProtocolConfigContractClient::new(&env, &contract_id);
+    config.initialize(&admin);
+
+    for event in read_events(&env) {
+        assert_matches_fixture(&env, &event);
+    }
+}
+
+#[test]
+fn issuer_registry_events_match_their_fixtures() {
+    let deployment = Deployment::new();
+    let next = Address::generate(&deployment.env);
+    let replacement = Address::generate(&deployment.env);
+    let second_id = hash(&deployment.env, 0x04);
+
+    for event in deployment.capture(|| {
+        deployment.issuers.register_issuer(
+            &second_id,
+            &next,
+            &hash(&deployment.env, 0xC4),
+            &hash(&deployment.env, 0x99),
+        )
+    }) {
+        assert_matches_fixture(&deployment.env, &event);
+    }
+
+    for event in deployment.capture(|| {
+        deployment
+            .issuers
+            .update_issuer(&deployment.issuer_id, &hash(&deployment.env, 0xC5))
+    }) {
+        assert_matches_fixture(&deployment.env, &event);
+    }
+
+    for event in deployment.capture(|| {
+        deployment.issuers.suspend_issuer(
+            &soroban_sdk::BytesN::from_array(&deployment.env, &{
+                let mut a = [0xA5u8; 32];
+                a[1] = 6;
+                a[2] = 0;
+                a
+            }),
+            &deployment.issuer_id,
+            &soroban_sdk::BytesN::from_array(&deployment.env, &[1u8; 32]),
+        )
+    }) {
+        assert_matches_fixture(&deployment.env, &event);
+    }
+
+    for event in deployment.capture(|| {
+        deployment.issuers.reactivate_issuer(
+            &soroban_sdk::BytesN::from_array(&deployment.env, &{
+                let mut a = [0xA5u8; 32];
+                a[1] = 5;
+                a[2] = 0;
+                a
+            }),
+            &deployment.issuer_id,
+            &soroban_sdk::BytesN::from_array(&deployment.env, &[1u8; 32]),
+        )
+    }) {
+        assert_matches_fixture(&deployment.env, &event);
+    }
+
+    for event in deployment.capture(|| {
+        deployment
+            .issuers
+            .rotate_issuer_address(&deployment.issuer_id, &replacement)
+    }) {
+        assert_matches_fixture(&deployment.env, &event);
+    }
+
+    for event in deployment.capture(|| {
+        deployment.issuers.revoke_issuer(
+            &soroban_sdk::BytesN::from_array(&deployment.env, &{
+                let mut a = [0xA5u8; 32];
+                a[1] = 4;
+                a[2] = 0;
+                a
+            }),
+            &deployment.issuer_id,
+            &soroban_sdk::BytesN::from_array(&deployment.env, &[1u8; 32]),
+        )
+    }) {
+        assert_matches_fixture(&deployment.env, &event);
+    }
+}
+
+#[test]
+fn proof_registry_events_match_their_fixtures() {
+    let deployment = Deployment::new();
+
+    let issuer_revoked = deployment.register_proof(0x21);
+    for event in deployment.capture(|| deployment.proofs.revoke_proof(&issuer_revoked)) {
+        assert_matches_fixture(&deployment.env, &event);
+    }
+
+    let admin_revoked = deployment.register_proof(0x22);
+    for event in deployment.capture(|| deployment.proofs.admin_revoke_proof(&admin_revoked)) {
+        assert_matches_fixture(&deployment.env, &event);
+    }
+}
+
+#[test]
+fn history_retention_and_consent_withdrawal_events_match_their_fixtures() {
+    let deployment = Deployment::new();
+    for event in deployment.capture(|| {
+        deployment.config.set_history_retention(
+            &earnproof_shared::HistoryKind::ConfigChange,
+            &16,
+            &0,
+        );
+    }) {
+        assert_matches_fixture(&deployment.env, &event);
+    }
+
+    let proof = deployment.register_proof(0x24);
+    for event in deployment.capture(|| {
+        deployment.proofs.withdraw_disclosure_consent(
+            &proof,
+            &BytesN::from_array(&deployment.env, &[0x31; 32]),
+            &1,
+            &1,
+            &BytesN::from_array(&deployment.env, &[0x32; 32]),
+        );
+    }) {
+        assert_matches_fixture(&deployment.env, &event);
+    }
+}
+
+#[test]
+fn the_declared_event_set_has_no_duplicates() {
+    // Two entries for one topic would make `declared_fields` return whichever
+    // came first, silently weakening every assertion that depends on it.
+    let mut seen: std::vec::Vec<&str> = std::vec::Vec::new();
+
+    for (name, _) in DECLARED_EVENTS {
+        assert!(
+            !seen.contains(name),
+            "topic {name} is declared more than once"
+        );
+        seen.push(name);
+    }
+}
+
+#[test]
+fn every_declared_event_names_at_least_one_payload_field() {
+    // An event with no payload would be a bare signal. None exists today, and
+    // adding one should be a deliberate decision recorded in docs/events.md
+    // rather than an empty fixture entry nobody noticed.
+    for (name, fields) in DECLARED_EVENTS {
+        assert!(
+            !fields.is_empty(),
+            "{name} declares no payload fields; \
+             a bare signal event needs an explicit note in docs/events.md"
+        );
+    }
+}
+
+#[test]
+fn proof_registry_declares_registration_and_revocation_events() {
+    let proof_events: std::vec::Vec<&str> = DECLARED_EVENTS
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| name.starts_with("proof_"))
+        .collect();
+
+    assert_eq!(
+        proof_events,
+        std::vec![
+            "proof_registered",
+            "proof_registered_with_payload",
+            "proof_revoked"
+        ],
+        "proof-registry event fixtures and docs/events.md must track every declared topic"
+    );
+}

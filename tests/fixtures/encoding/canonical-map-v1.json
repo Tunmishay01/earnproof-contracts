@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "domain": "earnproof:canonical-map:v1\\0",
+  "keyType": "UTF-8 string",
+  "valueType": "UTF-8 string",
+  "ordering": "ascending unsigned UTF-8 byte order",
+  "encoding": "domain || entry_count_u32be || repeated(key_len_u32be || key || value_len_u32be || value)",
+  "maximumEntries": 64,
+  "valid": [
+    {
+      "id": "ascii-policy",
+      "entries": [["country", "NG"], ["level", "3"], ["schema", "income-v1"]],
+      "permutation": [["schema", "income-v1"], ["country", "NG"], ["level", "3"]],
+      "sha256": "795681f67c3ce6df060a8547f52fc69818861349b9b2837cd5dd304f62a194b6"
+    },
+    {
+      "id": "utf8-key-order",
+      "entries": [["é", "utf8"], ["a", "first"]],
+      "sha256": "5abc35bd4fb67be331e74ccfafb6d5aaf0962dfc57a1225fbc9eab3665d26eb9"
+    }
+  ],
+  "invalid": [
+    {"id": "duplicate-key", "entries": [["schema", "one"], ["schema", "two"]], "reason": "duplicate key"},
+    {"id": "numeric-key", "entries": [[7, "value"]], "reason": "unsupported key type"},
+    {"id": "object-key", "entries": [[{"nested": true}, "value"]], "reason": "unsupported key type"}
+  ]
+}

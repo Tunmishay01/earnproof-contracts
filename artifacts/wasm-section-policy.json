@@ -1,0 +1,15 @@
+{
+  "$schema": "earnproof-wasm-section-policy/v1",
+  "maxArtifactBytes": 2097152,
+  "maxSections": 128,
+  "maxTotalCustomSectionBytes": 1310720,
+  "customSections": {
+    "contractenvmetav0": { "required": true, "maxBytes": 65536 },
+    "contractspecv0": { "required": true, "maxBytes": 1048576 },
+    "contractmetav0": { "required": false, "maxBytes": 65536 },
+    "producers": { "required": false, "maxBytes": 4096 },
+    "target_features": { "required": false, "maxBytes": 4096 }
+  },
+  "forbiddenCustomSections": ["name"],
+  "releasePolicy": "Debug names are forbidden. Producer and target metadata are retained, bounded, inventoried, and hashed with the artifact. Validation never rewrites the WASM."
+}

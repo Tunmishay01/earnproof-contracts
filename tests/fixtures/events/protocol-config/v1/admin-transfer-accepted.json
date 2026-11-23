@@ -1,0 +1,17 @@
+{
+  "event": "AdminTransferAccepted",
+  "contract": "protocol-config",
+  "contract_version": "0.1.0",
+  "schema_version": 1,
+  "topics": ["AdminTransferAccepted"],
+  "payload": {
+    "new_admin": {
+      "type": "Address",
+      "description": "Stellar address of the new protocol administrator.",
+      "example": "GCFIRY65OQE7DFP5KLNS2PF2LVZMUZYJX4OZIEQ36N2IQANUB5XVYOJR"
+    }
+  },
+  "emitted_by": "accept_admin",
+  "description": "Emitted when the protocol administrator transfer is accepted.",
+  "compatibility": "stable"
+}

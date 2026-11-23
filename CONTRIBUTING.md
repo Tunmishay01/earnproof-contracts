@@ -7,7 +7,14 @@ This repository contains Soroban contracts for EarnProof issuer status, proof co
 ```bash
 cargo build --workspace
 cargo test --workspace
+git config core.hooksPath .githooks
 ```
+
+Run the Git command once per checkout to enable the tracked hooks. The
+pre-commit hook runs workspace tests when staged Rust or Cargo files change.
+The commit-message hook accepts conventional subjects such as `feat: add proof
+search` and `fix(registry): reject inactive issuers`; scopes and issue IDs are
+optional.
 
 ## Validation
 
@@ -28,6 +35,7 @@ cargo build --workspace
 - Include negative tests for authorization failures and invalid transitions.
 - Keep private income data off-chain.
 - Update deployment docs and manifests when contract addresses or initialization flows change.
+- ///undone but
 
 ## Definition of Done
 
@@ -36,4 +44,3 @@ cargo build --workspace
 - Contract storage, authorization, and event behavior are covered by tests.
 - Documentation matches actual on-chain behavior.
 - Testnet deployment evidence is updated when deployment behavior changes.
-
