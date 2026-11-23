@@ -1,0 +1,306 @@
+# EarnProof WASM import/export allowlist policy
+#
+# This file is the reviewed allowlist for every symbol that may appear in a
+# release WASM artifact.  The audit-wasm tool checks each built artifact
+# against these entries and fails the build if any symbol is absent.
+#
+# Format
+# ------
+# [imports]  — section header; lines below are allowed host imports
+# [exports]  — section header; lines below are allowed contract exports
+# module::fn — an import entry (Soroban host module short-name :: function short-name)
+# name       — an export entry
+# Lines starting with '#' and blank lines are ignored.
+#
+# Soroban host module index (from soroban-env-common env.json)
+# ------------------------------------------------------------
+#   x  = context   i  = int     m  = map      v  = vec
+#   l  = ledger    d  = call    b  = buf       c  = crypto
+#   a  = address   p  = prng
+#
+# The 't' (test) module is intentionally absent.  Its presence in a release
+# artifact means the testutils feature was compiled into production code and
+# is a hard policy violation.
+#
+# Procedure for updating this file
+# ---------------------------------
+# 1. Build the contracts: stellar contract build
+# 2. Run: audit-wasm --policy scripts/wasm-import-policy.toml \
+#              target/wasm32v1-none/release/protocol_config.wasm \
+#              target/wasm32v1-none/release/issuer_registry.wasm \
+#              target/wasm32v1-none/release/proof_registry.wasm
+# 3. Review every new symbol before adding it here.
+# 4. Document the reason for any addition in a comment on the same line.
+
+[imports]
+
+# context (x) — ledger version, sequence, timestamp, events, diagnostics
+x::_
+x::0
+x::1
+x::2
+x::3
+x::4
+x::5
+x::6
+x::7
+x::8
+
+# int (i) — integer arithmetic, bit ops, conversions, u256/i256 support
+i::_
+i::0
+i::1
+i::2
+i::3
+i::4
+i::5
+i::6
+i::7
+i::8
+i::9
+i::a
+i::A
+i::b
+i::B
+i::c
+i::C
+i::d
+i::D
+i::e
+i::E
+i::f
+i::F
+i::g
+i::G
+i::h
+i::H
+i::i
+i::I
+i::j
+i::J
+i::k
+i::K
+i::l
+i::L
+i::m
+i::M
+i::n
+i::N
+i::o
+i::O
+i::p
+i::q
+i::r
+i::s
+i::t
+i::u
+i::v
+i::w
+i::x
+i::y
+i::z
+
+# map (m) — map object operations
+m::_
+m::0
+m::1
+m::2
+m::3
+m::4
+m::5
+m::6
+m::7
+m::8
+m::9
+m::a
+m::b
+m::c
+
+# vec (v) — vector object operations
+v::_
+v::0
+v::1
+v::2
+v::3
+v::4
+v::5
+v::6
+v::7
+v::8
+v::9
+v::a
+v::b
+v::c
+v::d
+v::e
+v::f
+v::g
+v::h
+
+# ledger (l) — persistent, instance, temporary storage; TTL extension
+l::_
+l::0
+l::1
+l::2
+l::3
+l::4
+l::5
+l::6
+l::7
+l::8
+l::9
+l::a
+l::b
+l::c
+l::d
+l::e
+l::f
+l::g
+l::h
+l::i
+l::j
+
+# call (d) — cross-contract calls, auth, address operations
+d::_
+d::0
+
+# buf (b) — bytes/string object operations, linear memory helpers
+b::_
+b::0
+b::1
+b::2
+b::3
+b::4
+b::5
+b::6
+b::7
+b::8
+b::9
+b::a
+b::b
+b::c
+b::d
+b::e
+b::f
+b::g
+b::h
+b::i
+b::j
+b::k
+b::l
+b::m
+b::n
+b::o
+
+# crypto (c) — hash, verify, signature operations
+c::_
+c::0
+c::1
+c::2
+c::3
+c::4
+c::5
+c::6
+c::7
+c::8
+c::9
+c::a
+c::A
+c::b
+c::B
+c::c
+c::C
+c::d
+c::e
+c::f
+c::g
+c::h
+c::i
+c::j
+c::k
+c::l
+c::m
+c::n
+c::o
+c::p
+c::q
+c::r
+c::s
+c::t
+c::u
+c::v
+c::w
+c::x
+c::y
+c::z
+
+# address (a) — address object operations and require_auth
+a::_
+a::0
+a::1
+a::2
+a::3
+a::4
+a::5
+a::6
+a::7
+a::8
+a::9
+a::a
+
+# prng (p) — pseudorandom number generator (not used by EarnProof contracts
+#             but allowed in the host interface; presence in an artifact
+#             should be reviewed before shipping)
+p::_
+p::0
+p::1
+p::2
+
+# NOTE: 't' (test) module is NOT listed here.
+# Any t::* import in a release artifact is a critical violation indicating
+# that soroban-sdk testutils were compiled into production code.
+
+[exports]
+
+# Standard Soroban contract exports emitted by stellar contract build
+# for every contract (memory layout sentinels and the WASM memory export).
+_
+memory
+__data_end
+__heap_base
+
+# protocol-config public interface
+initialize
+get_admin
+set_admin
+is_paused
+pause
+unpause
+approve_schema_version
+deprecate_schema_version
+is_schema_version_approved
+get_config_version
+
+# issuer-registry public interface
+# (initialize and get_admin are shared names; listed once above)
+register_issuer
+update_issuer
+suspend_issuer
+reactivate_issuer
+revoke_issuer
+rotate_issuer_address
+get_issuer
+get_issuer_by_address
+is_active_issuer
+is_active_address
+
+# proof-registry public interface
+# (initialize and get_admin are shared names; listed once above)
+get_issuer_registry
+get_protocol_config
+register_proof
+revoke_proof
+admin_revoke_proof
+get_proof
+is_valid_proof
+is_revoked

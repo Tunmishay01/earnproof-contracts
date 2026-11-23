@@ -1,0 +1,17 @@
+[package]
+name = "audit-wasm"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Checks release WASM artifacts against an import/export allowlist policy."
+
+[[bin]]
+name = "audit-wasm"
+path = "src/main.rs"
+
+[dependencies]
+wasmparser.workspace = true
+
+[dev-dependencies]
+wat = "1.0"

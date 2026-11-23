@@ -142,9 +142,11 @@ See [tests/doc-examples/mod.rs](tests/doc-examples/mod.rs) for complete document
 
 ## Current Validation Status
 
-The repository now pins a stable Rust toolchain in `rust-toolchain.toml` and CI runs formatting, clippy, tests, and build.
+The repository now pins a stable Rust toolchain in `rust-toolchain.toml` and CI runs formatting, clippy, tests, build, and WASM import/export audit.
 
 The current test suite covers protocol configuration defaults and schema changes, issuer registration/status transitions/duplicate prevention, proof registration/expiration/revocation/duplicate prevention, cross-contract dependency checks, storage TTL behavior, and authorization paths through mocked Soroban auth.
+
+The WASM audit (`tools/audit-wasm`) checks every release artifact against the allowlist in `scripts/wasm-import-policy.toml`. It reports any import or export absent from the policy and exits non-zero. The `t` (test) host module is explicitly excluded from the allowlist; its presence would indicate testutils compiled into production code.
 
 The current testnet deployment manifest is checked in at `scripts/deployment-manifest.testnet.json`.
 
