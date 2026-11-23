@@ -24,6 +24,9 @@ use earnproof_shared::{
     MIGRATION_STATUS_VERSION, PROOF_POLICY_VERSIONS_VERSION, SHA256_COMMITMENT_ALGORITHM_V1,
     TTL_EXTEND_TO_LEDGERS, TTL_THRESHOLD_LEDGERS, UPGRADE_APPROVAL_EXPIRY_LEDGERS,
     UPGRADE_TIMELOCK_LEDGERS,
+    INVARIANT_CHECKPOINT_RECEIPT_VERSION, INVARIANT_STATUS_PASSED, INVARIANT_STATUS_FAILED,
+    INVARIANT_STATUS_BLOCKED, INVARIANT_CHECKPOINT_BUFFER_SIZE,
+    compute_invariant_checkpoint_receipt_hash, InvariantCheckpointReceipt,
 };
 use soroban_sdk::{
     contract, contractclient, contractevent, contractimpl, contracttype, Address, Bytes, BytesN,
@@ -176,6 +179,18 @@ enum DataKey {
     ParticipantCommitment(Address),
     /// `(proof, commitment)` pair for a subject-authorized actor.
     SubjectActor(BytesN<32>, BytesN<32>),
+    /// Ring buffer slot for invariant checkpoint receipts.
+    InvariantCheckpointRing(u32),
+    /// Monotonically-increasing total count of invariant checkpoint receipts.
+    InvariantCheckpointTotal,
+    /// Map from WASM hash to most recent InvariantCheckpointReceipt.
+    InvariantCheckpointByHash(BytesN<32>),
+    /// Retention policy for invariant checkpoint history.
+    InvariantCheckpointRetention,
+    /// Final invariant checkpoint recorded at migration completion.
+    MigrationFinalCheckpoint,
+    /// Governance-triggered invariant audit receipt.
+    GovernanceInvariantReceipt(BytesN<32>),
 }
 
 #[contractevent]
