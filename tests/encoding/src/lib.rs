@@ -13,6 +13,9 @@ mod assurance_levels;
 mod governance_receipts;
 
 #[cfg(test)]
+mod canonical_map;
+
+#[cfg(test)]
 mod tests {
     use earnproof_shared::{LEGACY_COMMITMENT_ALGORITHM, SHA256_COMMITMENT_ALGORITHM_V1};
     use sha2::{Digest, Sha256};

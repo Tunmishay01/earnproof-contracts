@@ -16,6 +16,9 @@ use earnproof_shared::{
     METADATA_REVISION_INITIAL, MIGRATION_STATUS_VERSION, SIGNING_KEY_LIFECYCLE_HISTORY_CAPACITY,
     TTL_EXTEND_TO_LEDGERS, TTL_THRESHOLD_LEDGERS, UPGRADE_APPROVAL_EXPIRY_LEDGERS,
     UPGRADE_TIMELOCK_LEDGERS,
+    INVARIANT_CHECKPOINT_RECEIPT_VERSION, INVARIANT_STATUS_PASSED, INVARIANT_STATUS_FAILED,
+    INVARIANT_STATUS_BLOCKED, INVARIANT_CHECKPOINT_BUFFER_SIZE,
+    compute_invariant_checkpoint_receipt_hash, InvariantCheckpointReceipt,
 };
 use soroban_sdk::{contract, contractevent, contractimpl, contracttype, Address, BytesN, Env, Vec};
 
@@ -95,6 +98,18 @@ enum DataKey {
     GovernanceAssignment(GovernanceRole, Address),
     GovernanceRoleDelay(GovernanceRole),
     RevocationTombstone(BytesN<32>),
+    /// Ring buffer slot for invariant checkpoint receipts.
+    InvariantCheckpointRing(u32),
+    /// Monotonically-increasing total count of invariant checkpoint receipts.
+    InvariantCheckpointTotal,
+    /// Map from WASM hash to most recent InvariantCheckpointReceipt.
+    InvariantCheckpointByHash(BytesN<32>),
+    /// Retention policy for invariant checkpoint history.
+    InvariantCheckpointRetention,
+    /// Final invariant checkpoint recorded at migration completion.
+    MigrationFinalCheckpoint,
+    /// Governance-triggered invariant audit receipt.
+    GovernanceInvariantReceipt(BytesN<32>),
 }
 
 #[contractevent]
@@ -151,7 +166,7 @@ pub struct AdminTransferExpired {
     pub cleaned_at_ledger: u32,
 }
 
-// ── upgrade events ────────────────────────────────────────────────────────────
+// ?? upgrade events ????????????????????????????????????????????????????????????
 
 /// Emitted when the admin adds a WASM hash to the upgrade allowlist.
 #[contractevent]
@@ -318,7 +333,7 @@ pub struct SigningKeyLifecycleChanged {
     pub effective_ledger: u32,
 }
 
-// ── capacity and cooldown governance events ─────────────────────────────────
+// ?? capacity and cooldown governance events ?????????????????????????????????
 
 /// Emitted when the governed maximum active-issuer capacity is changed.
 #[contractevent]
@@ -965,7 +980,7 @@ impl IssuerRegistryContract {
         Ok(())
     }
 
-    // ── capability bitmap, storage layout, deployment identity, grace ─────────
+    // ?? capability bitmap, storage layout, deployment identity, grace ?????????
 
     /// Versioned capability report. The bitmap is a constant of the deployed
     /// code; only `contract_version` is read from storage.
@@ -985,6 +1000,11 @@ impl IssuerRegistryContract {
             ISSUER_REGISTRY_CAPABILITIES,
             capability,
         )
+    }
+
+    /// This leaf contract has no governed contract dependencies.
+    pub fn get_dependencies(env: Env) -> Vec<Address> {
+        Vec::new(&env)
     }
 
     /// Active storage layout, code layout, pending migration target, and
@@ -1914,9 +1934,9 @@ impl IssuerRegistryContract {
             .persistent()
             .get(&DataKey::CompromisedSigningKeyCount(issuer_id.clone()))
             .unwrap_or(0);
-        if sequence == u32::MAX {
-            return Err(IssuerError::InvalidTransition);
-        }
+        let next_sequence = sequence
+            .checked_add(1)
+            .ok_or(IssuerError::SequenceOverflow)?;
         let record = CompromisedSigningKeyRecord {
             record_version: 1,
             issuer_id_hash: issuer_id.clone(),
@@ -1931,7 +1951,7 @@ impl IssuerRegistryContract {
         let count_key = DataKey::CompromisedSigningKeyCount(issuer_id.clone());
         env.storage().persistent().set(&marker, &record);
         env.storage().persistent().set(&history_key, &record);
-        env.storage().persistent().set(&count_key, &(sequence + 1));
+        env.storage().persistent().set(&count_key, &next_sequence);
         for key in [&marker, &history_key, &count_key] {
             env.storage().persistent().extend_ttl(
                 key,
@@ -1945,9 +1965,6 @@ impl IssuerRegistryContract {
         if pending_matches {
             env.storage().persistent().remove(&pending_key);
         }
-        let lifecycle_sequence =
-            Self::checked_signing_key_sequence(env.clone(), issuer_id.clone(), 1)
-                .unwrap_or(u64::from(sequence + 1));
         let _ = Self::append_signing_key_transition(
             env.clone(),
             issuer_id.clone(),
@@ -2453,6 +2470,19 @@ impl IssuerRegistryContract {
         }
         Self::require_auth(&pending.new_address);
 
+        // Reserve both monotonic values before changing the address indexes.
+        // Any overflow therefore leaves the pending nomination and issuer
+        // record untouched.
+        let count_key = DataKey::RotationCount(issuer_id_hash.clone());
+        let rotation_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        let next_rotation_count = rotation_count
+            .checked_add(1)
+            .ok_or(IssuerError::SequenceOverflow)?;
+        let current_epoch = Self::get_issuer_epoch(env.clone());
+        current_epoch
+            .checked_add(1)
+            .ok_or(IssuerError::SequenceOverflow)?;
+
         let old_address = record.issuer_address.clone();
         env.storage()
             .persistent()
@@ -2478,9 +2508,6 @@ impl IssuerRegistryContract {
         Self::extend_issuer_key_ttl(env.clone(), &issuer_key);
         Self::extend_address_ttl(env.clone(), pending.new_address.clone());
 
-        let count_key = DataKey::RotationCount(issuer_id_hash.clone());
-        let rotation_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-
         let rotation_record = RotationRecord {
             old_address: old_address.clone(),
             new_address: pending.new_address.clone(),
@@ -2494,7 +2521,7 @@ impl IssuerRegistryContract {
             .set(&history_key, &rotation_record);
         env.storage()
             .persistent()
-            .set(&count_key, &(rotation_count + 1));
+            .set(&count_key, &next_rotation_count);
         Self::extend_issuer_key_ttl(env.clone(), &history_key);
         Self::extend_issuer_key_ttl(env.clone(), &count_key);
 
@@ -2718,7 +2745,7 @@ impl IssuerRegistryContract {
             })
     }
 
-    // ── epoch, capacity, cooldown, interface version ──────────────────────────
+    // ?? epoch, capacity, cooldown, interface version ??????????????????????????
 
     /// Machine-readable interface version this contract exposes to consumers.
     pub fn interface_version(_env: Env) -> InterfaceVersion {
@@ -2843,7 +2870,7 @@ impl IssuerRegistryContract {
         Ok(())
     }
 
-    // ── upgrade governance ────────────────────────────────────────────────────
+    // ?? upgrade governance ????????????????????????????????????????????????????
 
     /// Returns the stored monotonic contract version.  Starts at 1.
     pub fn get_contract_version(env: Env) -> u32 {
@@ -3099,7 +3126,7 @@ impl IssuerRegistryContract {
     ///
     /// # Re-approval
     /// Re-approval replaces ALL timing metadata. Old timing is
-    /// never reused — prevents stale metadata from persisting.
+    /// never reused ? prevents stale metadata from persisting.
     ///
     /// # Authorization
     /// Caller must be the authorized admin.
@@ -3143,7 +3170,7 @@ impl IssuerRegistryContract {
             migration_complete,
         );
 
-        // Store approval — ALWAYS creates fresh timing metadata
+        // Store approval ? ALWAYS creates fresh timing metadata
         // Never reuses stale fields from a previous approval
         let approval = UpgradeApproval {
             wasm_hash: wasm_hash.clone(),
@@ -3241,7 +3268,7 @@ impl IssuerRegistryContract {
             "invalid pre-upgrade admin address invariant"
         );
 
-        // Load approval — error if none exists
+        // Load approval ? error if none exists
         let approval: UpgradeApproval = env
             .storage()
             .instance()
@@ -3259,7 +3286,7 @@ impl IssuerRegistryContract {
 
         // Check expiry: too late
         if current_ledger >= approval.expires_at {
-            // Approval expired — leave state unchanged
+            // Approval expired ? leave state unchanged
             // Caller must re-approve
             return Err(ContractError::UpgradeApprovalExpired);
         }
@@ -3296,7 +3323,7 @@ impl IssuerRegistryContract {
             }
         }
 
-        // All checks passed — execute upgrade
+        // All checks passed ? execute upgrade
         // Consume allowlist entry before applying to prevent replay.
         env.storage()
             .instance()
@@ -3377,7 +3404,7 @@ impl IssuerRegistryContract {
             .map(|a| a.precondition_digest)
     }
 
-    // ── private helpers ───────────────────────────────────────────────────────
+    // ?? private helpers ???????????????????????????????????????????????????????
 
     fn require_valid_admin(address: &Address) -> Result<(), ContractError> {
         if !earnproof_shared::is_valid_principal_address(address) {
@@ -3833,7 +3860,7 @@ mod test {
         (env, client, admin)
     }
 
-    // ── existing tests ────────────────────────────────────────────────────────
+    // ?? existing tests ????????????????????????????????????????????????????????
     // -----------------------------------------------------------------------
     // Existing behavioral tests (preserved)
     // -----------------------------------------------------------------------
@@ -4081,7 +4108,7 @@ mod test {
         });
     }
 
-    // ── bounded batch issuer status query tests ───────────────────────────────
+    // ?? bounded batch issuer status query tests ???????????????????????????????
 
     #[test]
     fn batch_status_reports_each_state_in_request_order() {
@@ -4236,7 +4263,7 @@ mod test {
         });
     }
 
-    // ── upgrade governance tests ──────────────────────────────────────────────
+    // ?? upgrade governance tests ??????????????????????????????????????????????
 
     #[test]
     fn contract_version_initialized_to_one() {
@@ -4422,7 +4449,7 @@ mod test {
             &bytes(&env, 99),
         );
 
-        // Attempt a duplicate — the invocation must panic.
+        // Attempt a duplicate ? the invocation must panic.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.register_issuer(
                 &issuer_id,
@@ -4674,11 +4701,11 @@ mod test {
     // Auth mock-parity (#72)
     //
     // Every test above uses env.mock_all_auths() via setup(), which lets any
-    // caller through unconditionally — it can never observe that
+    // caller through unconditionally ? it can never observe that
     // revoke_issuer actually demands the *admin's* signature specifically.
     // This test scopes mock_auths to a real, valid signer that is not the
     // admin (the registered issuer's own address) and asserts the contract's
-    // real require_auth(&admin) check rejects it — proving the issuer's own
+    // real require_auth(&admin) check rejects it ? proving the issuer's own
     // valid signature cannot authorize an admin-only operation on itself.
     // -----------------------------------------------------------------------
 
@@ -4693,7 +4720,7 @@ mod test {
 
         // mock_auths (below) registers a stand-in auth contract at each
         // mocked address, so the address must be one the test Env generated
-        // itself — a hardcoded G-string constant (like ISSUER_ONE, used by
+        // itself ? a hardcoded G-string constant (like ISSUER_ONE, used by
         // every other test in this module under mock_all_auths()) is not a
         // valid registration target here.
         let issuer_id = bytes(&env, 1);
@@ -4706,7 +4733,7 @@ mod test {
         );
 
         // From here on, only the issuer's own signature is authorized for
-        // this specific revoke_issuer invocation — not a blanket
+        // this specific revoke_issuer invocation ? not a blanket
         // mock_all_auths(). The issuer's signature is genuinely valid (it is
         // a real, well-formed authorization the host will accept); it is
         // simply for the wrong address. If require_auth(&admin) were ever
@@ -4733,7 +4760,7 @@ mod test {
         assert_eq!(client.get_issuer(&issuer_id).status, IssuerStatus::Active);
     }
 
-    // ── numeric boundary tests ────────────────────────────────────────────────
+    // ?? numeric boundary tests ????????????????????????????????????????????????
 
     /// Contract version boundaries for issuer-registry.
     /// While issuer-registry has no direct numeric user inputs, it does support
@@ -4817,7 +4844,7 @@ mod test {
         );
     }
 
-    // ── adversarial initialization tests ───────────────────────────────────────
+    // ?? adversarial initialization tests ???????????????????????????????????????
 
     /// Verify that first initialization writes exactly the documented state
     /// with no partial writes or missing fields.
@@ -4902,7 +4929,7 @@ mod test {
     /// without state or event changes.
     ///
     /// This tests that the re-initialization guard does not discriminate
-    /// based on caller identity — it prevents any re-initialization attempt.
+    /// based on caller identity ? it prevents any re-initialization attempt.
     #[test]
     fn reinitialization_by_different_admin_fails_atomically() {
         let env = Env::default();
@@ -5107,7 +5134,7 @@ mod test {
         );
     }
 
-    // ── genesis identity (issue #192) ────────────────────────────────────────
+    // ?? genesis identity (issue #192) ????????????????????????????????????????
 
     #[test]
     fn genesis_is_recorded_at_initialization() {
@@ -5169,7 +5196,7 @@ mod test {
         assert_eq!(result, Err(Ok(ContractError::NotInitialized)));
     }
 
-    // ── issuer metadata URI hash commitments (issue 179) ───────────────────────
+    // ?? issuer metadata URI hash commitments (issue 179) ???????????????????????
 
     #[test]
     fn register_issuer_initializes_metadata_commitments() {
@@ -5316,7 +5343,7 @@ mod test {
         assert_eq!(record.metadata_uri_hash, bytes(&env, 0));
     }
 
-    // ── issuer status effective ledger metadata (issue 180) ────────────────────
+    // ?? issuer status effective ledger metadata (issue 180) ????????????????????
 
     #[test]
     fn register_issuer_records_status_effective_metadata() {
@@ -5673,6 +5700,45 @@ mod test {
     }
 
     #[test]
+    fn compromised_key_sequence_accepts_max_minus_one_and_rejects_max_atomically() {
+        let (env, client, _admin) = setup();
+        let issuer_id = bytes(&env, 0x6A);
+        client.register_issuer(
+            &issuer_id,
+            &Address::from_str(&env, ISSUER_ONE),
+            &bytes(&env, 2),
+            &bytes(&env, 99),
+        );
+        let first = bytes(&env, 0x6B);
+        let second = bytes(&env, 0x6C);
+        client.propose_issuer_signing_key(&issuer_id, &first, &1);
+        client.activate_issuer_signing_key(&issuer_id);
+        client.propose_issuer_signing_key(&issuer_id, &second, &1);
+        client.activate_issuer_signing_key(&issuer_id);
+
+        env.as_contract(&client.address, || {
+            env.storage().persistent().set(
+                &DataKey::CompromisedSigningKeyCount(issuer_id.clone()),
+                &(u32::MAX - 1),
+            );
+        });
+        let record =
+            client.mark_signing_key_compromised(&issuer_id, &first, &1, &bytes(&env, 0x6D));
+        assert_eq!(record.sequence, u32::MAX - 1);
+
+        let events_before = env.events().all().len();
+        assert_eq!(
+            client.try_mark_signing_key_compromised(&issuer_id, &second, &1, &bytes(&env, 0x6E)),
+            Err(Ok(IssuerError::SequenceOverflow))
+        );
+        assert!(client.get_active_issuer_signing_key(&issuer_id).is_some());
+        assert!(client
+            .get_compromised_signing_key(&issuer_id, &second, &1)
+            .is_none());
+        assert_eq!(env.events().all().len(), events_before);
+    }
+
+    #[test]
     fn only_admin_can_mark_a_signing_key_compromised() {
         let env = Env::default();
         env.mock_all_auths();
@@ -5735,7 +5801,7 @@ mod upgrade_timelock_tests {
         (env, client, admin)
     }
 
-    // ── SUITE 1: Approve stores correct timing ────────────────
+    // ?? SUITE 1: Approve stores correct timing ????????????????
 
     #[test]
     fn test_approve_stores_created_at() {
@@ -5855,7 +5921,7 @@ mod upgrade_timelock_tests {
         });
     }
 
-    // ── SUITE 2: Timelock enforcement ─────────────────────────
+    // ?? SUITE 2: Timelock enforcement ?????????????????????????
 
     #[test]
     fn test_execute_before_timelock_rejected() {
@@ -5907,7 +5973,7 @@ mod upgrade_timelock_tests {
         assert!(client.try_upgrade_contract(&hash, &2).is_err());
     }
 
-    // ── SUITE 3: Expiry enforcement ────────────────────────────
+    // ?? SUITE 3: Expiry enforcement ????????????????????????????
 
     #[test]
     fn test_execute_after_expiry_rejected() {
@@ -5973,7 +6039,7 @@ mod upgrade_timelock_tests {
         });
     }
 
-    // ── SUITE 4: Revocation ────────────────────────────────────
+    // ?? SUITE 4: Revocation ????????????????????????????????????
 
     #[test]
     fn test_revoke_removes_approval() {
@@ -6030,14 +6096,14 @@ mod upgrade_timelock_tests {
     fn test_revoke_idempotent_when_no_approval() {
         let (env, client, _) = setup();
 
-        // Revoke with no approval — should not panic
+        // Revoke with no approval ? should not panic
         let revoke_proposal_id = bytes(&env, 0xd7);
         assert!(client
             .try_revoke_upgrade_approval(&revoke_proposal_id)
             .is_ok());
     }
 
-    // ── SUITE 5: Overflow boundary ─────────────────────────────
+    // ?? SUITE 5: Overflow boundary ?????????????????????????????
 
     #[test]
     fn test_approve_at_max_ledger_does_not_overflow() {
@@ -6046,7 +6112,7 @@ mod upgrade_timelock_tests {
         // Set high ledger sequence number within host bounds
         env.ledger().set_sequence_number(10_000_000);
 
-        // Must not panic — saturating_add used
+        // Must not panic ? saturating_add used
         let result = client.try_approve_upgrade(
             &make_wasm_hash(&env),
             &BytesN::from_array(&env, &[1u8; 32]),
@@ -6069,7 +6135,7 @@ mod upgrade_timelock_tests {
         assert_eq!(result, u32::MAX, "saturating_add must cap at u32::MAX");
     }
 
-    // ── SUITE 6: Replay prevention ─────────────────────────────
+    // ?? SUITE 6: Replay prevention ?????????????????????????????
 
     #[test]
     fn test_cannot_replay_used_approval() {
@@ -6086,7 +6152,7 @@ mod upgrade_timelock_tests {
         // Execute (consumes approval)
         client.upgrade_contract(&hash, &2);
 
-        // Replay attempt — must fail (no approval)
+        // Replay attempt ? must fail (no approval)
         let result = client.try_upgrade_contract(&hash, &2);
 
         assert_eq!(
@@ -6113,12 +6179,12 @@ mod upgrade_timelock_tests {
         assert_eq!(result, Err(Ok(ContractError::WasmHashMismatch)));
     }
 
-    // ── SUITE 7: Authorization ─────────────────────────────────
+    // ?? SUITE 7: Authorization ?????????????????????????????????
 
     #[test]
     fn test_approve_requires_admin_auth() {
         let env = Env::default();
-        // Do NOT mock all auths — test auth enforcement
+        // Do NOT mock all auths ? test auth enforcement
         let contract_id = env.register(IssuerRegistryContract, ());
         let client = IssuerRegistryContractClient::new(&env, &contract_id);
         let admin = Address::from_str(&env, ADMIN);

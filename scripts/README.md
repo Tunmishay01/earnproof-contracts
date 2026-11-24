@@ -213,6 +213,19 @@ credentials. The CI workflow (`ci.yml`) runs only `cargo fmt`, `cargo clippy`,
 pwsh -NonInteractive -File scripts\verify-manifest.tests.ps1
 ```
 
+## Storage Rent Projections
+
+Generate the deterministic synthetic storage-growth report:
+
+```powershell
+python scripts/generate-storage-rent-report.py
+python scripts/generate-storage-rent-report.py --check
+```
+
+The report uses pinned encoded fixture sizes and a fixed ledger horizon. It
+reports byte-ledgers, not volatile network fee prices, and does not replace
+the enforced resource budget tests.
+
 Tests cover offline validation, live happy-path, admin mismatches, paused state,
 schema approval failures, malformed CLI output, timeouts, and transient RPC retries.
 No real network calls are made — all live checks use mock functions.

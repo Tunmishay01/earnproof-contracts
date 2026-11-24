@@ -234,6 +234,67 @@ pub const fn capabilities_are_additive(previous: u64, next: u64) -> bool {
     previous & !next == 0
 }
 
+/// Compatibility classification for a capability bitmap transition.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum CapabilityTransition {
+    Compatible,
+    BreakingEvidenceRequired,
+    Invalid,
+}
+
+/// Classifies a proposed upgrade without discarding bits unknown to this
+/// build. Unknown bits previously advertised must always survive. Removing a
+/// known required bit is only classifiable as breaking across an explicit
+/// bitmap-version boundary; it is never silently treated as additive.
+pub const fn classify_capability_transition(
+    previous_bitmap_version: u32,
+    previous: u64,
+    next_bitmap_version: u32,
+    next: u64,
+    required: u64,
+) -> CapabilityTransition {
+    if next_bitmap_version < previous_bitmap_version {
+        return CapabilityTransition::Invalid;
+    }
+    if required & !previous != 0 {
+        return CapabilityTransition::Invalid;
+    }
+    let previous_known = known_capabilities(previous_bitmap_version);
+    let unknown_to_this_build = previous & !previous_known;
+    if unknown_to_this_build & !next != 0 {
+        return CapabilityTransition::Invalid;
+    }
+    let removed = previous & !next;
+    if removed == 0 {
+        return CapabilityTransition::Compatible;
+    }
+    if next_bitmap_version == previous_bitmap_version {
+        return CapabilityTransition::Invalid;
+    }
+    CapabilityTransition::BreakingEvidenceRequired
+}
+
+pub const fn capability_transition_is_allowed(
+    previous_bitmap_version: u32,
+    previous: u64,
+    next_bitmap_version: u32,
+    next: u64,
+    required: u64,
+    governed_breaking_evidence: bool,
+) -> bool {
+    match classify_capability_transition(
+        previous_bitmap_version,
+        previous,
+        next_bitmap_version,
+        next,
+        required,
+    ) {
+        CapabilityTransition::Compatible => true,
+        CapabilityTransition::BreakingEvidenceRequired => governed_breaking_evidence,
+        CapabilityTransition::Invalid => false,
+    }
+}
+
 /// Answers `has_capability` for any identifier. Identifiers that are out of
 /// range or undefined for the bitmap version are reported as unsupported.
 pub const fn has_capability(bitmap_version: u32, capabilities: u64, id: u32) -> bool {
@@ -332,5 +393,35 @@ mod tests {
         ));
         assert!(!capabilities_are_additive(previous, capability_bit(1)));
         assert!(capabilities_are_additive(0, 0));
+    }
+
+    #[test]
+    fn downgrade_rules_preserve_unknown_bits_and_require_breaking_evidence() {
+        let required = capability_bit(1) | capability_bit(2);
+        let unknown = capability_bit(63);
+        let previous = required | unknown;
+        assert_eq!(
+            classify_capability_transition(1, previous, 2, previous, required),
+            CapabilityTransition::Compatible
+        );
+        assert_eq!(
+            classify_capability_transition(1, previous, 2, required, required),
+            CapabilityTransition::Invalid
+        );
+        let removed_required = capability_bit(2) | unknown;
+        assert_eq!(
+            classify_capability_transition(1, previous, 2, removed_required, required),
+            CapabilityTransition::BreakingEvidenceRequired
+        );
+        assert!(!capability_transition_is_allowed(
+            1, previous, 2, removed_required, required, false
+        ));
+        assert!(capability_transition_is_allowed(
+            1, previous, 2, removed_required, required, true
+        ));
+        assert_eq!(
+            classify_capability_transition(1, previous, 1, removed_required, required),
+            CapabilityTransition::Invalid
+        );
     }
 }

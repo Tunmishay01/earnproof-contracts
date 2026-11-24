@@ -8,8 +8,9 @@
 //! Run: cargo test -p contract-compatibility-gate --test capability_bitmaps
 
 use earnproof_shared::capabilities::{
-    capabilities_are_additive, capabilities_are_valid, capability_bit, CAPABILITY_BITMAP_VERSION,
-    CAPABILITY_REGISTRY,
+    capabilities_are_additive, capabilities_are_valid, capability_bit,
+    capability_transition_is_allowed, classify_capability_transition, CapabilityTransition,
+    CAPABILITY_BITMAP_VERSION, CAPABILITY_REGISTRY,
 };
 use earnproof_shared::{
     ISSUER_REGISTRY_CAPABILITIES, PROOF_REGISTRY_CAPABILITIES, PROTOCOL_CONFIG_CAPABILITIES,
@@ -94,4 +95,25 @@ fn dropping_a_capability_would_be_detected() {
     let dropped = previous & !capability_bit(ids[0]);
     assert!(!capabilities_are_additive(previous, dropped));
     assert!(capabilities_are_additive(previous, previous));
+}
+
+#[test]
+fn required_downgrades_need_an_explicit_version_boundary_and_governed_evidence() {
+    let previous = ISSUER_REGISTRY_CAPABILITIES;
+    let required = capability_bit(0);
+    let next = previous & !required;
+    assert_eq!(
+        classify_capability_transition(1, previous, 1, next, required),
+        CapabilityTransition::Invalid
+    );
+    assert_eq!(
+        classify_capability_transition(1, previous, 2, next, required),
+        CapabilityTransition::BreakingEvidenceRequired
+    );
+    assert!(!capability_transition_is_allowed(
+        1, previous, 2, next, required, false
+    ));
+    assert!(capability_transition_is_allowed(
+        1, previous, 2, next, required, true
+    ));
 }

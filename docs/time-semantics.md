@@ -46,6 +46,16 @@ proof is invalid regardless of the current timestamp or `expires_at` value.
 `revoked_at` records the timestamp at the moment of revocation and is `0`
 until that point.
 
+### Timestamp regression
+
+Ledger sequence is monotonic, but a later ledger may repeat or report a lower
+timestamp. Proof-registry therefore records a contract-local timestamp
+high-water mark whenever time-gated proof validity or revocation logic runs.
+The effective timestamp is `max(current_timestamp, observed_timestamp)`.
+Equal timestamps are idempotent, and a regression cannot reopen an expired
+proof or move terminal revocation metadata backward. This high-water mark
+contains no user data and advances only when a greater timestamp is observed.
+
 ### Schema deprecation
 
 Schema deprecation is a **state guard**, not a time interval. It takes effect
@@ -86,6 +96,9 @@ fixture (no wall-clock time).
 | `revocation_before_expiry_makes_invalid` | Pre-expiry revocation |
 | `revoked_at_timestamp_is_correct` | `revoked_at` matches revocation time |
 | `created_at_matches_registration_timestamp` | `created_at` matches registration time |
+| `timestamp_regression_does_not_reopen_an_expired_proof` | Later ledger with lower timestamp stays expired |
+| `equal_timestamps_are_deterministic_across_monotonic_ledgers` | Equal timestamps preserve the same validity result |
+| `revocation_metadata_uses_the_timestamp_high_water_mark` | Terminal metadata never moves backward |
 | `revoked_at_zero_until_revoked` | `revoked_at = 0` on fresh proof |
 | `multiple_proofs_different_expiry_times` | Each proof expires at its own boundary |
 | `revoked_proof_ignores_expiry_advance` | Revocation is terminal across time advancement |

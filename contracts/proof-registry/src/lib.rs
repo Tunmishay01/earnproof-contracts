@@ -7,23 +7,26 @@
 use earnproof_shared::{
     consent_withdrawal_commitment, disclosure_consent_commitment, event_checkpoint,
     is_interface_compatible, AdminTransferState, AdminTransferStatus, ApprovalQuery,
-    ApprovalStatus, ArchivedProofRecord, ConsentWithdrawalRecord, ContractError, DisputeActorClass,
+    ApprovalStatus, ArchivedProofRecord, BatchValidationError, BatchValidationReason,
+    BatchValidationResult, ConsentWithdrawalRecord, ContractError, DisputeActorClass,
     DisputeFilingAnchor, DisputeFilingEligibility, DisputeFilingPolicy, DisputeFilingStatus,
     DisputeRecord, DisputeStatus, EventDomain, EventSequenceRange, EvidenceBundleCommitment,
-    GenesisRecord, InterfaceVersion,
-    MigrationStatus, PauseAcknowledgementRecord, PauseAcknowledgementRole, PauseScope, ProofError,
-    ProofPayloadRecord, ProofPolicyVersions, ProofRecord, ProofRegistrationInput, ProofStatus,
-    ProofValidity, ProofValidityDetails, SchemaPolicy, SchemaRateLimit, SchemaRateLimitUsage,
-    SubjectNullifier,
-    TtlStatus, UpgradeApproval, UpgradeApprovalMetadata, UpgradeApprovalRecord,
-    UpgradeHistoryRecord, UpgradeReceipt, ADMIN_TRANSFER_EXPIRY_LEDGERS, CONFIG_DIGEST_VERSION,
-    CONSENT_WITHDRAWAL_REASON_SUBJECT_REQUEST, CONSENT_WITHDRAWAL_VERSION, EVENT_RANGE_VERSION,
-    ISSUER_POLICY_ENCODING_VERSION, MAX_CONSENT_WITHDRAWAL_PAGE, MAX_CONSENT_WITHDRAWAL_REASON,
+    GenesisRecord, InterfaceVersion, MigrationStatus, PauseAcknowledgementRecord,
+    PauseAcknowledgementRole, PauseScope, ProofError, ProofPayloadRecord, ProofPolicyVersions,
+    ProofRecord, ProofRegistrationInput, ProofStatus, ProofValidity, ProofValidityDetails,
+    SchemaPolicy, SchemaRateLimit, SchemaRateLimitUsage, SubjectNullifier, TtlStatus,
+    UpgradeApproval, UpgradeApprovalMetadata, UpgradeApprovalRecord, UpgradeHistoryRecord,
+    UpgradeReceipt, ADMIN_TRANSFER_EXPIRY_LEDGERS, BATCH_VALIDATION_RESULT_VERSION,
+    CONFIG_DIGEST_VERSION, CONSENT_WITHDRAWAL_REASON_SUBJECT_REQUEST, CONSENT_WITHDRAWAL_VERSION,
+    EVENT_RANGE_VERSION, EVIDENCE_BUNDLE_COMMITMENT_VERSION, ISSUER_POLICY_ENCODING_VERSION,
+    LEGACY_COMMITMENT_ALGORITHM, MAX_CONSENT_WITHDRAWAL_PAGE, MAX_CONSENT_WITHDRAWAL_REASON,
     MAX_MIGRATION_BATCH, MAX_PAUSE_ACKNOWLEDGEMENT_HISTORY_PAGE, MAX_PROOF_BATCH_SIZE,
-    EVIDENCE_BUNDLE_COMMITMENT_VERSION, LEGACY_COMMITMENT_ALGORITHM, MIGRATION_STATUS_VERSION,
-    PROOF_POLICY_VERSIONS_VERSION, SHA256_COMMITMENT_ALGORITHM_V1,
+    MIGRATION_STATUS_VERSION, PROOF_POLICY_VERSIONS_VERSION, SHA256_COMMITMENT_ALGORITHM_V1,
     TTL_EXTEND_TO_LEDGERS, TTL_THRESHOLD_LEDGERS, UPGRADE_APPROVAL_EXPIRY_LEDGERS,
     UPGRADE_TIMELOCK_LEDGERS,
+    INVARIANT_CHECKPOINT_RECEIPT_VERSION, INVARIANT_STATUS_PASSED, INVARIANT_STATUS_FAILED,
+    INVARIANT_STATUS_BLOCKED, INVARIANT_CHECKPOINT_BUFFER_SIZE,
+    compute_invariant_checkpoint_receipt_hash, InvariantCheckpointReceipt,
 };
 use soroban_sdk::{
     contract, contractclient, contractevent, contractimpl, contracttype, Address, Bytes, BytesN,
@@ -61,6 +64,11 @@ pub trait IssuerRegistryInterface {
     fn get_issuer_id_for_address(env: Env, address: Address) -> Option<BytesN<32>>;
 }
 
+#[contractclient(name = "DependencyTopologyClient")]
+pub trait DependencyTopologyInterface {
+    fn get_dependencies(env: Env) -> Vec<Address>;
+}
+
 #[contract]
 pub struct ProofRegistryContract;
 
@@ -73,6 +81,7 @@ enum DisputeTransition {
 }
 
 const CONTRACT_ROLE: &str = "proof_registry";
+const MAX_DEPENDENCY_GRAPH_NODES: u32 = 16;
 
 #[contracttype]
 enum DataKey {
@@ -121,8 +130,10 @@ enum DataKey {
     /// Monotonic epoch, advanced once per externally visible proof mutation
     /// (registration, revocation, supersession, or archival change).
     RegistryEpoch,
+    /// Greatest ledger timestamp observed by time-gated proof logic.
+    ObservedTimestamp,
     /// Bounded auxiliary-payload metadata for a proof registered with a
-    /// payload (length and commitment hash only — never the raw bytes).
+    /// payload (length and commitment hash only ? never the raw bytes).
     ProofPayloadMeta(BytesN<32>),
     SchemaRateUsage(u32, u32),
     IssuerProofCaps(Address),
@@ -168,6 +179,18 @@ enum DataKey {
     ParticipantCommitment(Address),
     /// `(proof, commitment)` pair for a subject-authorized actor.
     SubjectActor(BytesN<32>, BytesN<32>),
+    /// Ring buffer slot for invariant checkpoint receipts.
+    InvariantCheckpointRing(u32),
+    /// Monotonically-increasing total count of invariant checkpoint receipts.
+    InvariantCheckpointTotal,
+    /// Map from WASM hash to most recent InvariantCheckpointReceipt.
+    InvariantCheckpointByHash(BytesN<32>),
+    /// Retention policy for invariant checkpoint history.
+    InvariantCheckpointRetention,
+    /// Final invariant checkpoint recorded at migration completion.
+    MigrationFinalCheckpoint,
+    /// Governance-triggered invariant audit receipt.
+    GovernanceInvariantReceipt(BytesN<32>),
 }
 
 #[contractevent]
@@ -194,7 +217,7 @@ pub struct AdminTransferExpired {
     pub cleaned_at_ledger: u32,
 }
 
-// ── upgrade events ────────────────────────────────────────────────────────────
+// ?? upgrade events ????????????????????????????????????????????????????????????
 
 /// Emitted when the admin adds a WASM hash to the upgrade allowlist.
 #[contractevent]
@@ -306,7 +329,7 @@ pub struct EvidenceBundleCommitted {
     pub epoch: u32,
 }
 
-// ── dispute events ───────────────────────────────────────────────────────────
+// ?? dispute events ???????????????????????????????????????????????????????????
 
 /// Emitted when a dispute is opened against a proof.
 #[contractevent]
@@ -344,7 +367,7 @@ pub struct DisputeRejected {
     pub rejected_at: u64,
 }
 
-// ── registry epoch events ────────────────────────────────────────────────────
+// ?? registry epoch events ????????????????????????????????????????????????????
 //
 // Every externally visible proof mutation carries the registry epoch it
 // advanced to, so a cache or indexer can invalidate on the epoch alone
@@ -458,7 +481,7 @@ impl ProofRegistryContract {
             return Err(ProofError::ProofAlreadyRevoked);
         }
 
-        if record.expires_at < env.ledger().timestamp() {
+        if record.expires_at < Self::monotonic_timestamp(&env) {
             return Err(ProofError::ProofExpired);
         }
 
@@ -523,7 +546,7 @@ impl ProofRegistryContract {
         if record.status == ProofStatus::Revoked {
             return Err(ProofError::ProofAlreadyRevoked);
         }
-        if env.ledger().timestamp() > record.expires_at {
+        if Self::monotonic_timestamp(&env) > record.expires_at {
             return Err(ProofError::ProofExpired);
         }
         Self::require_auth(&record.issuer_address);
@@ -762,6 +785,7 @@ impl ProofRegistryContract {
 
         Self::require_valid_principal(&admin)?;
         Self::validate_dependency_addresses(&env, &issuer_registry, &protocol_config)?;
+        Self::ensure_dependency_graph_acyclic(&env, &issuer_registry, &protocol_config)?;
         // Reject dependencies whose interface this contract does not understand
         // before any state is written, so a failed handshake mutates nothing.
         Self::require_compatible_dependencies(&env, &issuer_registry, &protocol_config)?;
@@ -997,7 +1021,7 @@ impl ProofRegistryContract {
         Ok(())
     }
 
-    // ── capability bitmap, storage layout, deployment identity, grace ─────────
+    // ?? capability bitmap, storage layout, deployment identity, grace ?????????
 
     /// Versioned capability report. The bitmap is a constant of the deployed
     /// code; only `contract_version` is read from storage.
@@ -1017,6 +1041,18 @@ impl ProofRegistryContract {
             PROOF_REGISTRY_CAPABILITIES,
             capability,
         )
+    }
+
+    /// Direct governed dependencies used for bounded topology validation.
+    pub fn get_dependencies(env: Env) -> Vec<Address> {
+        let mut dependencies = Vec::new(&env);
+        if let Some(issuer_registry) = env.storage().instance().get(&DataKey::IssuerRegistry) {
+            dependencies.push_back(issuer_registry);
+        }
+        if let Some(protocol_config) = env.storage().instance().get(&DataKey::ProtocolConfig) {
+            dependencies.push_back(protocol_config);
+        }
+        dependencies
     }
 
     /// Active storage layout, code layout, pending migration target, and
@@ -1418,9 +1454,7 @@ impl ProofRegistryContract {
             .instance()
             .get(&DataKey::PauseAcknowledgementCount)
             .unwrap_or(0);
-        if sequence == u32::MAX {
-            return Err(ContractError::InvalidState);
-        }
+        let next_sequence = sequence.checked_add(1).ok_or(ContractError::InvalidState)?;
         let record = PauseAcknowledgementRecord {
             record_version: 1,
             sequence,
@@ -1435,7 +1469,7 @@ impl ProofRegistryContract {
         env.storage().persistent().set(&history_key, &record);
         env.storage()
             .instance()
-            .set(&DataKey::PauseAcknowledgementCount, &(sequence + 1));
+            .set(&DataKey::PauseAcknowledgementCount, &next_sequence);
         for key in [&hash_key, &history_key] {
             env.storage().persistent().extend_ttl(
                 key,
@@ -1560,16 +1594,16 @@ impl ProofRegistryContract {
         }
         Self::require_auth(&issuer_address);
 
-        // Input validation (proof-specific data validation — checked before cross-contract calls)
+        // Input validation (proof-specific data validation ? checked before cross-contract calls)
         if schema_version == 0 {
             return Err(ProofError::InvalidSchemaVersion);
         }
 
-        if expires_at <= env.ledger().timestamp() {
+        if expires_at <= Self::monotonic_timestamp(&env) {
             return Err(ProofError::ProofExpired);
         }
 
-        // Check 1: Contract paused (highest precedence — most external state)
+        // Check 1: Contract paused (highest precedence ? most external state)
         let protocol_client = ProtocolConfigContractClient::new(&env, &protocol_config);
         if protocol_client.is_paused() {
             return Err(ProofError::ContractPaused);
@@ -1636,7 +1670,7 @@ impl ProofRegistryContract {
         // it is deterministic and non-forgeable by the caller. The proof
         // record and its timing are written together in a single persistent
         // `set`, so a proof never exists without its creation metadata.
-        let now = env.ledger().timestamp();
+        let now = Self::monotonic_timestamp(&env);
         let created_ledger = env.ledger().sequence();
         let record = ProofRecord {
             proof_id_hash: proof_id_hash.clone(),
@@ -1806,7 +1840,7 @@ impl ProofRegistryContract {
     /// auxiliary payload whose size is bounded by the schema's governed
     /// limit (`ProtocolConfigContract::get_schema_payload_limit`). The bound
     /// is enforced before any state is written. Only the payload's length
-    /// and a commitment hash are stored — never the raw bytes — so resource
+    /// and a commitment hash are stored ? never the raw bytes ? so resource
     /// use stays bounded regardless of the configured limit.
     pub fn register_proof_with_payload(
         env: Env,
@@ -1835,7 +1869,7 @@ impl ProofRegistryContract {
             return Err(ProofError::InvalidSchemaVersion);
         }
 
-        if expires_at <= env.ledger().timestamp() {
+        if expires_at <= Self::monotonic_timestamp(&env) {
             return Err(ProofError::ProofExpired);
         }
 
@@ -1857,7 +1891,7 @@ impl ProofRegistryContract {
         }
 
         // Schema-specific payload size bound, enforced before any state
-        // write — a zero-length payload is always within bounds, and a
+        // write ? a zero-length payload is always within bounds, and a
         // payload exactly at the limit is accepted.
         let max_payload_size = protocol_client.get_schema_payload_limit(&schema_version);
         let payload_len = payload.len();
@@ -1874,7 +1908,7 @@ impl ProofRegistryContract {
         let sequence_number = Self::next_issuer_proof_sequence(&env, &issuer_address)?;
         Self::consume_issuer_proof_capacity(&env, &issuer_address)?;
 
-        let now = env.ledger().timestamp();
+        let now = Self::monotonic_timestamp(&env);
         let created_ledger = env.ledger().sequence();
         let record = ProofRecord {
             proof_id_hash: proof_id_hash.clone(),
@@ -1965,15 +1999,15 @@ impl ProofRegistryContract {
     /// `activates_at` of `0` (or any value not after the current ledger
     /// timestamp) behaves exactly like [`Self::register_proof`]: the proof
     /// is active immediately. A nonzero `activates_at` in the future leaves
-    /// the proof [`ProofValidity::Pending`] — [`Self::is_valid_proof`]
+    /// the proof [`ProofValidity::Pending`] ? [`Self::is_valid_proof`]
     /// returns `false` and [`Self::get_proof_validity`] reports the pending
-    /// state with its activation time — until the ledger reaches that
+    /// state with its activation time ? until the ledger reaches that
     /// timestamp, at which point it becomes valid without any further call.
     ///
     /// `activates_at` is fixed at registration: there is no operation that
     /// changes it afterward, so it can never be moved earlier (or later)
     /// once set. Revoking a still-pending proof works exactly as it does for
-    /// an active one and is equally irreversible — a revoked proof never
+    /// an active one and is equally irreversible ? a revoked proof never
     /// becomes valid, whether or not it had reached its activation time.
     ///
     /// Every other validation and precondition is identical to
@@ -2003,7 +2037,7 @@ impl ProofRegistryContract {
         }
         Self::require_auth(&issuer_address);
 
-        // Input validation (proof-specific data validation — checked before cross-contract calls)
+        // Input validation (proof-specific data validation ? checked before cross-contract calls)
         if schema_version == 0 {
             return Err(ProofError::InvalidSchemaVersion);
         }
@@ -2016,7 +2050,7 @@ impl ProofRegistryContract {
             return Err(ProofError::InvalidActivationTime);
         }
 
-        // Check 1: Contract paused (highest precedence — most external state)
+        // Check 1: Contract paused (highest precedence ? most external state)
         let protocol_client = ProtocolConfigContractClient::new(&env, &protocol_config);
         if protocol_client.is_paused() {
             return Err(ProofError::ContractPaused);
@@ -2042,7 +2076,7 @@ impl ProofRegistryContract {
             return Err(ProofError::ProofAlreadyRegistered);
         }
 
-        let now = env.ledger().timestamp();
+        let now = Self::monotonic_timestamp(&env);
         let created_ledger = env.ledger().sequence();
         Self::consume_schema_rate_limit(&env, &protocol_client, schema_version)?;
         let sequence_number = Self::next_issuer_proof_sequence(&env, &issuer_address)?;
@@ -2075,10 +2109,10 @@ impl ProofRegistryContract {
     /// issuer, atomically.
     ///
     /// The batch is validated and written entry-by-entry, in order. If any
-    /// entry fails validation (duplicate proof id — whether already on chain
+    /// entry fails validation (duplicate proof id ? whether already on chain
     /// or repeated within this batch, zero schema version, expired
     /// timestamp, or an unapproved schema version), the call returns that
-    /// entry's error and — per Soroban's invocation semantics — every write
+    /// entry's error and ? per Soroban's invocation semantics ? every write
     /// and event already produced earlier in this same call is discarded
     /// along with it, so no partial batch is ever committed.
     ///
@@ -2089,6 +2123,20 @@ impl ProofRegistryContract {
     ///
     /// Emits one [`ProofRegisteredInBatch`] event per registered proof, in
     /// input order.
+    pub fn preflight_register_proofs_batch(
+        env: Env,
+        entries: Vec<ProofRegistrationInput>,
+    ) -> Result<BatchValidationResult, ProofError> {
+        let protocol_config =
+            Self::get_protocol_config(env.clone()).map_err(|_| ProofError::ProofNotFound)?;
+        let protocol_client = ProtocolConfigContractClient::new(&env, &protocol_config);
+        Ok(Self::registration_batch_validation(
+            &env,
+            &protocol_client,
+            &entries,
+        ))
+    }
+
     pub fn register_proofs_batch(
         env: Env,
         entries: Vec<ProofRegistrationInput>,
@@ -2100,6 +2148,10 @@ impl ProofRegistryContract {
         let len = entries.len();
         if len == 0 || len > MAX_PROOF_BATCH_SIZE {
             return Err(ProofError::InvalidBatchSize);
+        }
+
+        if Self::duplicate_registration_entry(&entries).is_some() {
+            return Err(ProofError::DuplicateBatchElement);
         }
 
         let protocol_config =
@@ -2114,7 +2166,7 @@ impl ProofRegistryContract {
         }
         Self::require_auth(&issuer_address);
 
-        // Check 1: Contract paused (highest precedence — most external state)
+        // Check 1: Contract paused (highest precedence ? most external state)
         let protocol_client = ProtocolConfigContractClient::new(&env, &protocol_config);
         if protocol_client.is_paused() {
             return Err(ProofError::ContractPaused);
@@ -2123,7 +2175,7 @@ impl ProofRegistryContract {
             return Err(ProofError::DependencyIdentityMismatch);
         }
 
-        // Check 2: Issuer active (issuer-specific state) — checked once for
+        // Check 2: Issuer active (issuer-specific state) ? checked once for
         // the whole batch, since every entry shares the same issuer.
         let issuer_client = IssuerRegistryContractClient::new(&env, &issuer_registry);
         if !issuer_client.is_active_address(&issuer_address) {
@@ -2149,7 +2201,7 @@ impl ProofRegistryContract {
 
             // Check 4: Uniqueness constraint (storage precondition). A proof
             // id repeated earlier in this same batch is already visible here,
-            // since writes made earlier in this call are readable within it —
+            // since writes made earlier in this call are readable within it ?
             // so this single check also rejects intra-batch duplicates.
             let key = DataKey::Proof(entry.proof_id_hash.clone());
             if env.storage().persistent().has(&key) {
@@ -2269,7 +2321,7 @@ impl ProofRegistryContract {
         Self::set_revoked(env, proof_id_hash, true, None)
     }
 
-    // ── revocation authority binding ──────────────────────────────────────────
+    // ?? revocation authority binding ??????????????????????????????????????????
 
     /// Authority and delegation policy version currently in force. A
     /// deployment that never set one reports version 1.
@@ -2340,7 +2392,7 @@ impl ProofRegistryContract {
         Self::set_revoked(env, proof_id_hash, true, Some(expected_policy_version))
     }
 
-    // ── activation acknowledgements ───────────────────────────────────────────
+    // ?? activation acknowledgements ???????????????????????????????????????????
 
     /// Issuer-only: authorizes or revokes `delegate` as an activator for the
     /// issuer's own proofs. The grant is scoped to this issuer.
@@ -2477,7 +2529,7 @@ impl ProofRegistryContract {
         Ok(record)
     }
 
-    // ── dispute resolver conflicts of interest ────────────────────────────────
+    // ?? dispute resolver conflicts of interest ????????????????????????????????
 
     /// Admin-only: registers `resolver` with a stable participant commitment.
     /// Re-registering the same address replaces its commitment. A new address
@@ -2617,7 +2669,7 @@ impl ProofRegistryContract {
     }
 
     /// Revokes a strictly bounded batch of proofs, atomically, authorizing
-    /// each entry against its own recorded issuer address — mirroring
+    /// each entry against its own recorded issuer address ? mirroring
     /// `revoke_proof`'s per-item authorization so a batch may mix proofs
     /// owned by different issuers as long as every one of those issuers
     /// signs the invocation.
@@ -2640,6 +2692,13 @@ impl ProofRegistryContract {
         proof_id_hashes: Vec<BytesN<32>>,
     ) -> Result<(), ProofError> {
         Self::revoke_batch(env, proof_id_hashes, true)
+    }
+
+    pub fn preflight_revoke_proofs_batch(
+        env: Env,
+        proof_id_hashes: Vec<BytesN<32>>,
+    ) -> BatchValidationResult {
+        Self::revocation_batch_validation(&env, &proof_id_hashes)
     }
 
     /// Records an issuer-authorized, hash-only disclosure-consent receipt.
@@ -2798,15 +2857,16 @@ impl ProofRegistryContract {
     /// Legacy boolean validity helper, retained for compatibility.
     ///
     /// It reflects only the two locally-checkable conditions (status and
-    /// expiry). For the full, structured reason — including issuer-inactive
-    /// and deprecated-schema outcomes that require cross-contract reads — use
+    /// expiry). For the full, structured reason ? including issuer-inactive
+    /// and deprecated-schema outcomes that require cross-contract reads ? use
     /// [`Self::proof_validity`]. `is_valid_proof` returns `true` exactly when
     /// `proof_validity` would return one of `Valid`, `IssuerInactive`, or
     /// `SchemaDeprecated` (i.e. the record is present, active, and unexpired).
     pub fn is_valid_proof(env: Env, proof_id_hash: BytesN<32>) -> bool {
         match Self::get_proof(env.clone(), proof_id_hash) {
             Ok(record) => {
-                Self::compute_validity(env.ledger().timestamp(), &record) == ProofValidity::Active
+                Self::compute_validity(Self::monotonic_timestamp(&env), &record)
+                    == ProofValidity::Active
             }
             Err(_) => false,
         }
@@ -2817,7 +2877,7 @@ impl ProofRegistryContract {
     /// collapses all but "active" to `false`.
     pub fn get_proof_validity(env: Env, proof_id_hash: BytesN<32>) -> ProofValidity {
         match Self::get_proof(env.clone(), proof_id_hash) {
-            Ok(record) => Self::compute_validity(env.ledger().timestamp(), &record),
+            Ok(record) => Self::compute_validity(Self::monotonic_timestamp(&env), &record),
             Err(_) => ProofValidity::NotFound,
         }
     }
@@ -2841,12 +2901,12 @@ impl ProofRegistryContract {
     /// deterministic order so that when several invalid conditions hold at
     /// once the earliest one is the reported primary reason:
     ///
-    /// 1. `Unknown`          — no record exists for `proof_id_hash`.
-    /// 2. `Revoked`          — the record's status is `Revoked`.
-    /// 3. `Expired`          — now is strictly after the record's `expires_at`.
-    /// 4. `IssuerInactive`   — the issuing address is not currently active.
-    /// 5. `SchemaDeprecated` — the record's schema version is not approved.
-    /// 6. `Valid`            — none of the above.
+    /// 1. `Unknown`          ? no record exists for `proof_id_hash`.
+    /// 2. `Revoked`          ? the record's status is `Revoked`.
+    /// 3. `Expired`          ? now is strictly after the record's `expires_at`.
+    /// 4. `IssuerInactive`   ? the issuing address is not currently active.
+    /// 5. `SchemaDeprecated` ? the record's schema version is not approved.
+    /// 6. `Valid`            ? none of the above.
     ///
     /// The query is read-only. Its only side effect is the documented TTL
     /// extension performed by [`Self::get_proof`] when the record exists;
@@ -2864,7 +2924,7 @@ impl ProofRegistryContract {
             return ProofValidity::Revoked;
         }
 
-        if env.ledger().timestamp() > record.expires_at {
+        if Self::monotonic_timestamp(&env) > record.expires_at {
             return ProofValidity::Expired;
         }
 
@@ -2909,13 +2969,13 @@ impl ProofRegistryContract {
         successors
     }
 
-    // ── dispute lifecycle ─────────────────────────────────────────────────────
+    // ?? dispute lifecycle ?????????????????????????????????????????????????????
 
     /// Opens a dispute against a proof, recording a commitment to off-chain
     /// evidence rather than the evidence itself.
     ///
     /// `disputant` must authorize the call; any address may dispute any
-    /// proof regardless of the proof's current status — dispute state is
+    /// proof regardless of the proof's current status ? dispute state is
     /// tracked entirely independently of `is_valid_proof`, `is_revoked`, and
     /// expiration, so opening (or resolving, or rejecting) a dispute never
     /// changes a proof's validity, and revoking or expiring a proof never
@@ -2924,7 +2984,7 @@ impl ProofRegistryContract {
     /// Fails with [`ProofError::DisputeAlreadyOpen`] if this proof already
     /// has a dispute whose status is `Open`: at most one dispute may be open
     /// per proof at a time. A prior dispute that reached `Withdrawn`,
-    /// `Resolved`, or `Rejected` does not block a new one — opening again
+    /// `Resolved`, or `Rejected` does not block a new one ? opening again
     /// simply overwrites that terminal record.
     pub fn open_dispute(
         env: Env,
@@ -3005,7 +3065,7 @@ impl ProofRegistryContract {
     }
 
     /// Withdraws an open dispute. Only the address that opened it may
-    /// withdraw it — not the admin, and not the proof's issuer unless the
+    /// withdraw it ? not the admin, and not the proof's issuer unless the
     /// issuer is the one who opened it.
     pub fn withdraw_dispute(env: Env, proof_id_hash: BytesN<32>) -> Result<(), ProofError> {
         Self::transition_dispute(env, proof_id_hash, DisputeTransition::Withdraw, None)
@@ -3177,8 +3237,8 @@ impl ProofRegistryContract {
         proof_id_hash: BytesN<32>,
     ) -> Result<ProofValidityDetails, ProofError> {
         let record = Self::get_proof(env.clone(), proof_id_hash)?;
-        let is_valid =
-            record.status == ProofStatus::Active && env.ledger().timestamp() <= record.expires_at;
+        let is_valid = record.status == ProofStatus::Active
+            && Self::monotonic_timestamp(&env) <= record.expires_at;
         let revoked = record.status == ProofStatus::Revoked;
         // Timing is reported only for a revoked proof, so an active proof never
         // exposes a fabricated revocation time.
@@ -3218,7 +3278,7 @@ impl ProofRegistryContract {
             .ok_or(ContractError::NotInitialized)
     }
 
-    // ── dependency interface handshake ────────────────────────────────────────
+    // ?? dependency interface handshake ????????????????????????????????????????
 
     /// Minimum `issuer-registry` interface version this contract accepts. A
     /// bound dependency must report the same major and at least this
@@ -3259,6 +3319,7 @@ impl ProofRegistryContract {
 
         let protocol_config = Self::get_protocol_config(env.clone())?;
         Self::validate_dependency_addresses(&env, &new_issuer_registry, &protocol_config)?;
+        Self::ensure_dependency_graph_acyclic(&env, &new_issuer_registry, &protocol_config)?;
         let actual =
             IssuerRegistryContractClient::new(&env, &new_issuer_registry).interface_version();
         if !is_interface_compatible(&REQUIRED_ISSUER_REGISTRY_VERSION, &actual) {
@@ -3289,6 +3350,7 @@ impl ProofRegistryContract {
 
         let issuer_registry = Self::get_issuer_registry(env.clone())?;
         Self::validate_dependency_addresses(&env, &issuer_registry, &new_protocol_config)?;
+        Self::ensure_dependency_graph_acyclic(&env, &issuer_registry, &new_protocol_config)?;
         let actual =
             ProtocolConfigContractClient::new(&env, &new_protocol_config).interface_version();
         if !is_interface_compatible(&REQUIRED_PROTOCOL_CONFIG_VERSION, &actual) {
@@ -3308,7 +3370,7 @@ impl ProofRegistryContract {
         Ok(())
     }
 
-    // ── upgrade governance ────────────────────────────────────────────────────
+    // ?? upgrade governance ????????????????????????????????????????????????????
 
     /// Returns the stored monotonic contract version.  Starts at 1.
     pub fn get_contract_version(env: Env) -> u32 {
@@ -3959,6 +4021,18 @@ impl ProofRegistryContract {
             }
         }
 
+        // Reserve the history index before any upgrade state is changed. A
+        // saturated counter must fail atomically rather than committing the
+        // new version without an indexable history record.
+        let history_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeHistoryCount)
+            .unwrap_or(0);
+        let next_history_count = history_count
+            .checked_add(1)
+            .unwrap_or_else(|| panic!("upgrade history overflow: reached maximum"));
+
         env.storage().persistent().remove(&key);
         env.storage()
             .instance()
@@ -4013,12 +4087,6 @@ impl ProofRegistryContract {
         env.storage().instance().remove(&DataKey::MigrationStatus);
         Self::extend_instance_ttl(env.clone());
 
-        let history_count: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::UpgradeHistoryCount)
-            .unwrap_or(0);
-
         let history_record = UpgradeHistoryRecord {
             old_wasm_hash,
             new_wasm_hash: wasm_hash.clone(),
@@ -4040,7 +4108,7 @@ impl ProofRegistryContract {
         );
         env.storage()
             .instance()
-            .set(&DataKey::UpgradeHistoryCount, &(history_count + 1));
+            .set(&DataKey::UpgradeHistoryCount, &next_history_count);
 
         ContractUpgraded {
             new_wasm_hash: wasm_hash,
@@ -4107,7 +4175,7 @@ impl ProofRegistryContract {
         result
     }
 
-    // ── private helpers ───────────────────────────────────────────────────────
+    // ?? private helpers ???????????????????????????????????????????????????????
 
     fn validate_dependency_addresses(
         env: &Env,
@@ -4127,6 +4195,49 @@ impl ProofRegistryContract {
             return Err(ContractError::InvalidInput);
         }
         Ok(())
+    }
+
+    fn ensure_dependency_graph_acyclic(
+        env: &Env,
+        issuer_registry: &Address,
+        protocol_config: &Address,
+    ) -> Result<(), ContractError> {
+        let root = env.current_contract_address();
+        let mut frontier = Vec::new(env);
+        frontier.push_back(issuer_registry.clone());
+        frontier.push_back(protocol_config.clone());
+        let mut visited = Vec::new(env);
+
+        for _ in 0..MAX_DEPENDENCY_GRAPH_NODES {
+            let Some(current) = frontier.pop_back() else {
+                return Ok(());
+            };
+            if current == root {
+                return Err(ContractError::InvalidState);
+            }
+            if visited.contains(current.clone()) {
+                continue;
+            }
+            visited.push_back(current.clone());
+            let dependencies = DependencyTopologyClient::new(env, &current).get_dependencies();
+            if dependencies.len() > MAX_DEPENDENCY_GRAPH_NODES {
+                return Err(ContractError::InvalidState);
+            }
+            for dependency in dependencies.iter() {
+                if dependency == root {
+                    return Err(ContractError::InvalidState);
+                }
+                frontier.push_back(dependency);
+                if frontier.len() > MAX_DEPENDENCY_GRAPH_NODES {
+                    return Err(ContractError::InvalidState);
+                }
+            }
+        }
+        if frontier.is_empty() {
+            Ok(())
+        } else {
+            Err(ContractError::InvalidState)
+        }
     }
 
     /// Resolves protocol-config (if configured) and reports whether `scope`
@@ -4241,6 +4352,18 @@ impl ProofRegistryContract {
         Ok(())
     }
 
+    fn monotonic_timestamp(env: &Env) -> u64 {
+        let current = env.ledger().timestamp();
+        let observed: Option<u64> = env.storage().instance().get(&DataKey::ObservedTimestamp);
+        let effective = current.max(observed.unwrap_or(current));
+        if observed != Some(effective) {
+            env.storage()
+                .instance()
+                .set(&DataKey::ObservedTimestamp, &effective);
+        }
+        effective
+    }
+
     fn set_revoked(
         env: Env,
         proof_id_hash: BytesN<32>,
@@ -4283,7 +4406,7 @@ impl ProofRegistryContract {
         }
 
         record.status = ProofStatus::Revoked;
-        let revoked_at = env.ledger().timestamp();
+        let revoked_at = Self::monotonic_timestamp(&env);
         let revoked_ledger = env.ledger().sequence();
         record.revoked_at = revoked_at;
         record.revoked_ledger = revoked_ledger;
@@ -4358,6 +4481,10 @@ impl ProofRegistryContract {
         let len = proof_id_hashes.len();
         if len == 0 || len > MAX_PROOF_BATCH_SIZE {
             return Err(ProofError::InvalidBatchSize);
+        }
+
+        if Self::duplicate_proof_id(&proof_id_hashes).is_some() {
+            return Err(ProofError::DuplicateBatchElement);
         }
 
         if let Ok(protocol_config) = Self::get_protocol_config(env.clone()) {
@@ -4439,6 +4566,117 @@ impl ProofRegistryContract {
         }
 
         Ok(())
+    }
+
+    fn invalid_batch(
+        index: u32,
+        related_index: u32,
+        reason: BatchValidationReason,
+    ) -> BatchValidationResult {
+        BatchValidationResult::Invalid(BatchValidationError {
+            version: BATCH_VALIDATION_RESULT_VERSION,
+            index,
+            related_index,
+            reason,
+        })
+    }
+
+    fn duplicate_registration_entry(entries: &Vec<ProofRegistrationInput>) -> Option<(u32, u32)> {
+        for index in 0..entries.len() {
+            let current = entries.get(index).expect("bounded index").proof_id_hash;
+            for first in 0..index {
+                if entries.get(first).expect("bounded index").proof_id_hash == current {
+                    return Some((index, first));
+                }
+            }
+        }
+        None
+    }
+
+    fn duplicate_proof_id(proof_ids: &Vec<BytesN<32>>) -> Option<(u32, u32)> {
+        for index in 0..proof_ids.len() {
+            let current = proof_ids.get(index).expect("bounded index");
+            for first in 0..index {
+                if proof_ids.get(first).expect("bounded index") == current {
+                    return Some((index, first));
+                }
+            }
+        }
+        None
+    }
+
+    fn registration_batch_validation(
+        env: &Env,
+        protocol: &ProtocolConfigContractClient,
+        entries: &Vec<ProofRegistrationInput>,
+    ) -> BatchValidationResult {
+        if entries.is_empty() {
+            return Self::invalid_batch(0, 0, BatchValidationReason::Empty);
+        }
+        if entries.len() > MAX_PROOF_BATCH_SIZE {
+            return Self::invalid_batch(
+                MAX_PROOF_BATCH_SIZE,
+                MAX_PROOF_BATCH_SIZE,
+                BatchValidationReason::TooLarge,
+            );
+        }
+        if let Some((index, first)) = Self::duplicate_registration_entry(entries) {
+            return Self::invalid_batch(index, first, BatchValidationReason::DuplicateIdentifier);
+        }
+        for index in 0..entries.len() {
+            let entry = entries.get(index).expect("bounded index");
+            if entry.schema_version == 0 {
+                return Self::invalid_batch(
+                    index,
+                    index,
+                    BatchValidationReason::InvalidSchemaVersion,
+                );
+            }
+            if entry.expires_at <= env.ledger().timestamp() {
+                return Self::invalid_batch(index, index, BatchValidationReason::Expired);
+            }
+            if !protocol.is_schema_version_approved(&entry.schema_version) {
+                return Self::invalid_batch(index, index, BatchValidationReason::UnsupportedSchema);
+            }
+        }
+        BatchValidationResult::Valid
+    }
+
+    fn revocation_batch_validation(
+        env: &Env,
+        proof_ids: &Vec<BytesN<32>>,
+    ) -> BatchValidationResult {
+        if proof_ids.is_empty() {
+            return Self::invalid_batch(0, 0, BatchValidationReason::Empty);
+        }
+        if proof_ids.len() > MAX_PROOF_BATCH_SIZE {
+            return Self::invalid_batch(
+                MAX_PROOF_BATCH_SIZE,
+                MAX_PROOF_BATCH_SIZE,
+                BatchValidationReason::TooLarge,
+            );
+        }
+        if let Some((index, first)) = Self::duplicate_proof_id(proof_ids) {
+            return Self::invalid_batch(index, first, BatchValidationReason::DuplicateIdentifier);
+        }
+        for index in 0..proof_ids.len() {
+            let proof_id = proof_ids.get(index).expect("bounded index");
+            let Some(record) = env
+                .storage()
+                .persistent()
+                .get::<_, ProofRecord>(&DataKey::Proof(proof_id))
+            else {
+                return Self::invalid_batch(index, index, BatchValidationReason::ProofNotFound);
+            };
+            if record.status == ProofStatus::Revoked {
+                return Self::invalid_batch(
+                    index,
+                    index,
+                    BatchValidationReason::ProofAlreadyRevoked,
+                );
+            }
+        }
+        BatchValidationResult::Valid
     }
 
     fn read_dispute(env: &Env, proof_id_hash: &BytesN<32>) -> Option<DisputeRecord> {
@@ -5029,7 +5267,7 @@ mod test {
         )
     }
 
-    // ── existing tests ────────────────────────────────────────────────────────
+    // ?? existing tests ????????????????????????????????????????????????????????
 
     #[test]
     fn admin_nomination_expiry_is_exact_and_replay_safe() {
@@ -5490,7 +5728,7 @@ mod test {
         });
     }
 
-    // ── upgrade governance tests ──────────────────────────────────────────────
+    // ?? upgrade governance tests ??????????????????????????????????????????????
 
     #[test]
     fn contract_version_initialized_to_one() {
@@ -5633,7 +5871,7 @@ mod test {
         assert_eq!(res, Err(Ok(ContractError::InvalidInput)));
     }
 
-    // ── numeric boundary tests ────────────────────────────────────────────────
+    // ?? numeric boundary tests ????????????????????????????????????????????????
 
     /// Table-driven tests for schema version boundaries in proof registration.
     /// Schema versions must be >= MIN_SCHEMA_VERSION (1).
@@ -5804,7 +6042,7 @@ mod test {
             );
         });
 
-        // Attempt to register with schema version 0 — should panic
+        // Attempt to register with schema version 0 ? should panic
         let register_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.register_proof(
                 &proof_id,
@@ -5838,7 +6076,7 @@ mod test {
         let current_time = env.ledger().timestamp();
         let proof_id = bytes(&env, 77);
 
-        // Attempt to register with expired timestamp — should panic
+        // Attempt to register with expired timestamp ? should panic
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.register_proof(
                 &proof_id,
@@ -5884,7 +6122,7 @@ mod test {
         assert_eq!(client.get_contract_version(), u32::MAX);
     }
 
-    // ── adversarial initialization tests ───────────────────────────────────────
+    // ?? adversarial initialization tests ???????????????????????????????????????
 
     /// Verify that first initialization writes exactly the documented state
     /// with no partial writes or missing fields.
@@ -6218,7 +6456,7 @@ mod test {
         .is_err());
     }
 
-    // ── cross-contract initialization and ordering tests ──────────────────────
+    // ?? cross-contract initialization and ordering tests ??????????????????????
 
     /// Verify that the required deployment and initialization ordering is enforced.
     ///
@@ -6611,7 +6849,7 @@ mod test {
         assert!(!pc_client.is_paused());
     }
 
-    // ── proof revocation effective ledger metadata tests ───────────────────────
+    // ?? proof revocation effective ledger metadata tests ???????????????????????
 
     #[test]
     fn active_proof_validity_exposes_no_revocation_time() {
@@ -6838,9 +7076,12 @@ mod test {
         assert_eq!(expired.revoked_ledger, 0);
     }
 
-    // ── bounded batch proof registration ─────────────────────────────────────
+    // ?? bounded batch proof registration ?????????????????????????????????????
 
-    use earnproof_shared::{disclosure_consent_commitment, ProofRegistrationInput};
+    use earnproof_shared::{
+        disclosure_consent_commitment, BatchValidationError, BatchValidationReason,
+        BatchValidationResult, ProofRegistrationInput, BATCH_VALIDATION_RESULT_VERSION,
+    };
 
     fn batch_input(env: &Env, seed: u8, expires_at: u64) -> ProofRegistrationInput {
         ProofRegistrationInput {
@@ -6979,8 +7220,17 @@ mod test {
         batch.push_back(batch_input(&env, 2, 2_000));
         batch.push_back(batch_input(&env, 1, 2_000)); // duplicate of the first
 
+        assert_eq!(
+            client.preflight_register_proofs_batch(&batch),
+            BatchValidationResult::Invalid(BatchValidationError {
+                version: BATCH_VALIDATION_RESULT_VERSION,
+                index: 2,
+                related_index: 0,
+                reason: BatchValidationReason::DuplicateIdentifier,
+            })
+        );
         let result = client.try_register_proofs_batch(&batch, &issuer);
-        assert_eq!(result, Err(Ok(ProofError::ProofAlreadyRegistered)));
+        assert_eq!(result, Err(Ok(ProofError::DuplicateBatchElement)));
 
         // Atomicity: even the entries that would have succeeded (seed 1, 2)
         // must not have been committed.
@@ -7135,7 +7385,7 @@ mod test {
         assert_eq!(result, Err(Ok(ProofError::ProofNotFound)));
     }
 
-    // ── delayed proof activation ──────────────────────────────────────────────
+    // ?? delayed proof activation ??????????????????????????????????????????????
 
     #[test]
     fn register_proof_with_activation_zero_is_immediately_active() {
@@ -7494,7 +7744,7 @@ mod test {
         );
     }
 
-    // ── bounded batch proof revocation ───────────────────────────────────────
+    // ?? bounded batch proof revocation ???????????????????????????????????????
 
     const ISSUER_TWO: &str = "GDWUSKGGFDI4FRXK5EBTRECZSVQSSWJHHJOGH6JWG3AUMFFMQ435DIAG";
 
@@ -7670,8 +7920,17 @@ mod test {
         );
 
         let batch = ids(&env, &[1, 2, 1]); // duplicate of the first
+        assert_eq!(
+            client.preflight_revoke_proofs_batch(&batch),
+            BatchValidationResult::Invalid(BatchValidationError {
+                version: BATCH_VALIDATION_RESULT_VERSION,
+                index: 2,
+                related_index: 0,
+                reason: BatchValidationReason::DuplicateIdentifier,
+            })
+        );
         let result = client.try_revoke_proofs_batch(&batch);
-        assert_eq!(result, Err(Ok(ProofError::ProofAlreadyRevoked)));
+        assert_eq!(result, Err(Ok(ProofError::DuplicateBatchElement)));
 
         // Atomicity: even the entries that would have succeeded must not be committed.
         assert!(!client.is_revoked(&bytes(&env, 1)));
@@ -7954,7 +8213,7 @@ mod test {
         assert!(client.is_revoked(&bytes(&env, 2)));
     }
 
-    // ── proof dispute status lifecycle ──────────────────────────────────────────
+    // ?? proof dispute status lifecycle ??????????????????????????????????????????
 
     const THIRD_PARTY: &str = "GDWUSKGGFDI4FRXK5EBTRECZSVQSSWJHHJOGH6JWG3AUMFFMQ435DIAG";
 
@@ -8533,7 +8792,7 @@ mod test {
         assert_eq!(matching[0].1, env.ledger().timestamp());
     }
 
-    // ── genesis identity (issue #192) ────────────────────────────────────────
+    // ?? genesis identity (issue #192) ????????????????????????????????????????
 
     #[test]
     fn genesis_is_recorded_at_initialization() {
@@ -8590,7 +8849,7 @@ mod test {
         );
     }
 
-    // ── registry epoch (issue #187) ───────────────────────────────────────────
+    // ?? registry epoch (issue #187) ???????????????????????????????????????????
 
     #[test]
     fn registry_epoch_starts_at_zero() {
@@ -8756,7 +9015,7 @@ mod test {
         assert_eq!(client.get_registry_epoch(), epoch_before);
     }
 
-    // ── schema-specific payload size limits (issue #190) ─────────────────────
+    // ?? schema-specific payload size limits (issue #190) ?????????????????????
 
     #[test]
     fn register_proof_with_payload_accepts_a_zero_length_payload() {
@@ -8946,7 +9205,7 @@ mod test {
         );
     }
 
-    // ── structured proof validity reasons (issue 147) ──────────────────────────
+    // ?? structured proof validity reasons (issue 147) ??????????????????????????
 
     #[test]
     fn proof_validity_reports_valid_for_active_unexpired_proof() {
@@ -9045,7 +9304,7 @@ mod test {
         );
     }
 
-    // ── issue 178: dependency interface version handshake ──────────────────────
+    // ?? issue 178: dependency interface version handshake ??????????????????????
 
     use earnproof_shared::InterfaceVersion;
     use soroban_sdk::{contract, contractimpl};
@@ -9068,6 +9327,9 @@ mod test {
         pub fn interface_version(_env: Env) -> InterfaceVersion {
             InterfaceVersion::new(99, 0, 0)
         }
+        pub fn get_dependencies(env: Env) -> Vec<Address> {
+            Vec::new(&env)
+        }
     }
 
     /// A dependency that advances minor/patch within the same major, which the
@@ -9089,6 +9351,55 @@ mod test {
         pub fn interface_version(_env: Env) -> InterfaceVersion {
             InterfaceVersion::new(1, 5, 3)
         }
+        pub fn get_dependencies(env: Env) -> Vec<Address> {
+            Vec::new(&env)
+        }
+    }
+
+    #[contract]
+    pub struct TopologyDependency;
+
+    #[contractimpl]
+    impl TopologyDependency {
+        pub fn set_dependencies(env: Env, dependencies: Vec<Address>) {
+            env.storage()
+                .instance()
+                .set(&Symbol::new(&env, "deps"), &dependencies);
+        }
+
+        pub fn get_dependencies(env: Env) -> Vec<Address> {
+            env.storage()
+                .instance()
+                .get(&Symbol::new(&env, "deps"))
+                .unwrap_or_else(|| Vec::new(&env))
+        }
+    }
+
+    #[test]
+    fn dependency_replacement_rejects_direct_and_indirect_cycles_atomically() {
+        let (env, client, _protocol_config, _issuer_registry, original_issuer) = setup();
+        let root = client.address.clone();
+
+        let direct = env.register(TopologyDependency, ());
+        TopologyDependencyClient::new(&env, &direct)
+            .set_dependencies(&soroban_sdk::vec![&env, root.clone()]);
+        assert_eq!(
+            client.try_set_issuer_registry(&direct),
+            Err(Ok(ContractError::InvalidState))
+        );
+        assert_eq!(client.get_issuer_registry(), original_issuer);
+
+        let intermediate = env.register(TopologyDependency, ());
+        TopologyDependencyClient::new(&env, &intermediate)
+            .set_dependencies(&soroban_sdk::vec![&env, root]);
+        let indirect = env.register(TopologyDependency, ());
+        TopologyDependencyClient::new(&env, &indirect)
+            .set_dependencies(&soroban_sdk::vec![&env, intermediate]);
+        assert_eq!(
+            client.try_set_issuer_registry(&indirect),
+            Err(Ok(ContractError::InvalidState))
+        );
+        assert_eq!(client.get_issuer_registry(), original_issuer);
     }
 
     #[test]
@@ -9183,7 +9494,7 @@ mod test {
         assert_eq!(client.proof_validity(&proof_id), ProofValidity::Expired);
     }
 
-    // ── proof creation ledger + timestamp metadata (issue 184) ─────────────────
+    // ?? proof creation ledger + timestamp metadata (issue 184) ?????????????????
 
     #[test]
     fn register_proof_records_creation_ledger_and_timestamp() {

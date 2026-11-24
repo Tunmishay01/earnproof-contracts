@@ -11,6 +11,31 @@ console.log(expiration.toString("hex"));
 
 const domainHash = (...parts: Buffer[]) => createHash("sha256").update(Buffer.concat(parts)).digest();
 const ascii = (value: string) => Buffer.from(value, "ascii");
+
+const canonicalMapHash = (entries: Array<[string, string]>) => {
+	if (entries.length > 64) throw new Error("Too many map entries");
+	const seen = new Set<string>();
+	for (const [key] of entries) {
+		if (typeof key !== "string") throw new Error("Unsupported key type");
+		if (seen.has(key)) throw new Error("Duplicate key");
+		seen.add(key);
+	}
+	const u32 = (value: number) => {
+		const bytes = Buffer.alloc(4);
+		bytes.writeUInt32BE(value);
+		return bytes;
+	};
+	const ordered = [...entries].sort(([a], [b]) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
+	const encoded = [Buffer.from("earnproof:canonical-map:v1\0"), u32(ordered.length)];
+	for (const [key, value] of ordered) {
+		const keyBytes = Buffer.from(key, "utf8");
+		const valueBytes = Buffer.from(value, "utf8");
+		encoded.push(u32(keyBytes.length), keyBytes, u32(valueBytes.length), valueBytes);
+	}
+	return createHash("sha256").update(Buffer.concat(encoded)).digest("hex");
+};
+
+console.log(canonicalMapHash([["schema", "income-v1"], ["country", "NG"], ["level", "3"]]));
 const networkPassphrase = "Test SDF Network ; September 2015";
 const issuer = "GCATS5YOVB6ROX2WUNKGNQ2MP3GMXDMKSG2O4N5CLX3A6W4PZGZZI55U";
 const otherIssuer = "GDWUSKGGFDI4FRXK5EBTRECZSVQSSWJHHJOGH6JWG3AUMFFMQ435DIAG";

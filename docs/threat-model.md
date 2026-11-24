@@ -179,15 +179,20 @@ proof-registry.register_proof()
    - Set once at initialization, not modifiable
    - **Control**: Deployment validation required
 
-2. **No Reentrancy**
-   - Soroban does not support reentrancy during cross-contract calls
-   - State changes committed before external calls return
-   - **Control**: Soroban runtime enforcement
+2. **Reentrant callback resistance**
+   - A test dependency attempts to call its caller again while the original
+     invocation is active.
+   - The guarded caller rejects the callback and the host rolls back storage
+     and events in both contracts.
+   - **Control**: Explicit guard plus transaction atomicity, exercised in
+     `tests/cross-contract/src/resilience.rs`
 
 3. **Call Depth Limits**
    - Soroban enforces maximum call depth
    - Current call chain depth: 3 (proof-registry → issuer-registry/protocol-config)
-   - **Control**: Well below Soroban limits
+   - A chain of unique contract instances is driven beyond the host limit and
+     asserted to leave no partial state or ghost events.
+   - **Control**: Bounded production topology plus host limit and rollback tests
 
 ### Cross-Contract Threats
 

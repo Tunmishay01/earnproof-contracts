@@ -43,3 +43,9 @@ mod enumeration;
 
 #[cfg(test)]
 mod probe;
+
+#[cfg(test)]
+mod depth_boundaries;
+
+#[cfg(test)]
+mod principal_parity;

@@ -24,9 +24,20 @@ missing event is eventually noticed while a wrong one is silently committed.
    sequence of N operations yields N events in invocation order.
 5. **No protected data.** Payloads carry hashes, public addresses, version
    numbers, and timestamps. Never an amount, a memo, an identity, or a secret.
+6. **Reviewed payload ceiling.** Every versioned event fixture has an explicit
+   encoded-size budget. A new event, an undeclared variable-width field, or a
+   payload whose conservative XDR bound exceeds its ceiling fails CI.
 
 Each is asserted in [`tests/events/`](../tests/events/); the mapping is in
 [Test coverage](#test-coverage) below.
+
+The size policy is [`scripts/event-payload-budgets.json`](../scripts/event-payload-budgets.json)
+and is enforced by `python3 scripts/check-event-payload-budgets.py`. Budgets are
+keyed by contract and event rather than inherited from a global default, so a
+new event cannot silently acquire permission to publish a large payload. Event
+fields in the current interfaces are fixed-width hashes, addresses, scalars,
+or fixed-width records; caller-controlled variable-length payloads are rejected
+by contract validation before storage mutation or publication.
 
 ## Event catalogue
 

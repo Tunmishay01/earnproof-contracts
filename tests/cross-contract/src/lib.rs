@@ -46,3 +46,6 @@ mod references;
 
 #[cfg(test)]
 mod races;
+
+#[cfg(test)]
+mod resilience;

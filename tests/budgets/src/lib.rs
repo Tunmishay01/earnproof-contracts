@@ -925,6 +925,165 @@ mod tests {
         );
     }
 
+    fn instance_ttl(env: &Env, contract: &Address) -> u32 {
+        use soroban_sdk::testutils::storage::Instance as _;
+        env.as_contract(contract, || env.storage().instance().get_ttl())
+    }
+
+    fn event_count(env: &Env) -> u32 {
+        use soroban_sdk::testutils::Events as _;
+        env.events().all().len()
+    }
+
+    fn measured_pause_cost() -> (u64, u64) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register(ProtocolConfigContract, ());
+        let client = ProtocolConfigContractClient::new(&env, &id);
+        client.initialize(&Address::from_str(&env, ADMIN));
+        env.cost_estimate().budget().reset_unlimited();
+        client.pause();
+        let budget = env.cost_estimate().budget();
+        (budget.cpu_instruction_cost(), budget.memory_bytes_cost())
+    }
+
+    #[test]
+    fn protocol_pause_rolls_back_at_multiple_budget_cut_points() {
+        let (cpu, memory) = measured_pause_cost();
+        for percent in [25_u64, 50, 75] {
+            let env = Env::default();
+            env.mock_all_auths();
+            let id = env.register(ProtocolConfigContract, ());
+            let client = ProtocolConfigContractClient::new(&env, &id);
+            client.initialize(&Address::from_str(&env, ADMIN));
+            let version_before = client.get_config_version();
+            let ttl_before = instance_ttl(&env, &id);
+            let events_before = event_count(&env);
+
+            env.cost_estimate()
+                .budget()
+                .reset_limits(cpu * percent / 100, memory * 2);
+            let failed = client.try_pause().is_err();
+            env.cost_estimate().budget().reset_unlimited();
+
+            assert!(failed, "pause must exhaust at {percent}% CPU");
+            assert!(!client.is_paused());
+            assert_eq!(client.get_config_version(), version_before);
+            assert_eq!(instance_ttl(&env, &id), ttl_before);
+            assert_eq!(event_count(&env), events_before);
+        }
+    }
+
+    fn measured_issuer_registration_cost() -> (u64, u64) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register(IssuerRegistryContract, ());
+        let client = IssuerRegistryContractClient::new(&env, &id);
+        client.initialize(&Address::from_str(&env, ADMIN));
+        env.cost_estimate().budget().reset_unlimited();
+        client.register_issuer(
+            &bytes(&env, 1),
+            &Address::from_str(&env, ISSUER_ONE),
+            &bytes(&env, 2),
+            &bytes(&env, 3),
+        );
+        let budget = env.cost_estimate().budget();
+        (budget.cpu_instruction_cost(), budget.memory_bytes_cost())
+    }
+
+    #[test]
+    fn issuer_registration_rolls_back_on_cpu_and_memory_exhaustion() {
+        let (cpu, memory) = measured_issuer_registration_cost();
+        for (cpu_limit, memory_limit, dimension) in [
+            (cpu * 3 / 4, memory * 2, "CPU"),
+            (cpu * 2, memory * 3 / 4, "memory"),
+        ] {
+            let env = Env::default();
+            env.mock_all_auths();
+            let id = env.register(IssuerRegistryContract, ());
+            let client = IssuerRegistryContractClient::new(&env, &id);
+            client.initialize(&Address::from_str(&env, ADMIN));
+            let issuer_id = bytes(&env, 1);
+            let epoch_before = client.get_issuer_epoch();
+            let count_before = client.get_active_issuer_count();
+            let ttl_before = instance_ttl(&env, &id);
+            let events_before = event_count(&env);
+
+            env.cost_estimate()
+                .budget()
+                .reset_limits(cpu_limit, memory_limit);
+            let failed = client
+                .try_register_issuer(
+                    &issuer_id,
+                    &Address::from_str(&env, ISSUER_ONE),
+                    &bytes(&env, 2),
+                    &bytes(&env, 3),
+                )
+                .is_err();
+            env.cost_estimate().budget().reset_unlimited();
+
+            assert!(failed, "registration must exhaust its {dimension} budget");
+            assert!(client.try_get_issuer(&issuer_id).is_err());
+            assert_eq!(client.get_issuer_epoch(), epoch_before);
+            assert_eq!(client.get_active_issuer_count(), count_before);
+            assert_eq!(instance_ttl(&env, &id), ttl_before);
+            assert_eq!(event_count(&env), events_before);
+        }
+    }
+
+    fn measured_proof_registration_cost() -> (u64, u64) {
+        let env = Env::default();
+        let (client, _, _, issuer) = setup_proof_registry(&env);
+        env.cost_estimate().budget().reset_unlimited();
+        client.register_proof_typed(
+            &bytes(&env, 1),
+            &bytes(&env, 2),
+            &issuer,
+            &1,
+            &2_000,
+            &bytes(&env, 1),
+        );
+        let budget = env.cost_estimate().budget();
+        (budget.cpu_instruction_cost(), budget.memory_bytes_cost())
+    }
+
+    #[test]
+    fn proof_registration_rolls_back_on_cpu_and_memory_exhaustion() {
+        let (cpu, memory) = measured_proof_registration_cost();
+        for (cpu_limit, memory_limit, dimension) in [
+            (cpu * 3 / 4, memory * 2, "CPU"),
+            (cpu * 2, memory * 3 / 4, "memory"),
+        ] {
+            let env = Env::default();
+            let (client, _, _, issuer) = setup_proof_registry(&env);
+            let proof_id = bytes(&env, 1);
+            let epoch_before = client.get_registry_epoch();
+            let ttl_before = instance_ttl(&env, &client.address);
+            let events_before = event_count(&env);
+
+            env.cost_estimate()
+                .budget()
+                .reset_limits(cpu_limit, memory_limit);
+            let failed = client
+                .try_register_proof_typed(
+                    &proof_id,
+                    &bytes(&env, 2),
+                    &issuer,
+                    &1,
+                    &2_000,
+                    &bytes(&env, 1),
+                )
+                .is_err();
+            env.cost_estimate().budget().reset_unlimited();
+
+            assert!(failed, "registration must exhaust its {dimension} budget");
+            assert!(client.try_get_proof(&proof_id).is_err());
+            assert_eq!(client.get_registry_epoch(), epoch_before);
+            assert_eq!(instance_ttl(&env, &client.address), ttl_before);
+            assert_eq!(event_count(&env), events_before);
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Regression Detection Test
     //
@@ -966,3 +1125,6 @@ mod tests {
         assert_budget(&env, "regression_test", 300_000, 1);
     }
 }
+
+#[cfg(test)]
+mod storage_footprint;

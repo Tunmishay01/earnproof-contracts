@@ -14,6 +14,21 @@ The canonical fixture is [vectors.json](../tests/fixtures/encoding/vectors.json)
 - A disclosure policy is serialized as RFC 8785 canonical JSON, encoded as UTF-8 without a byte-order mark or trailing newline, then hashed with SHA-256. Object keys are canonicalized by the RFC; array order is significant. Reject duplicate object keys and non-JSON values before canonicalization. `disclosure-policy-basic` and `disclosure-policy-eligibility` in `vectors.tsv` are normative byte-for-byte examples.
 - The all-zero disclosure-policy hash means “no policy commitment supplied” and is accepted only by the legacy registration endpoints. The policy-aware registration endpoints reject that sentinel. The contract stores only the fixed-size hash, never policy bytes.
 
+## Canonical map commitments (version 1)
+
+Map commitments accept at most 64 UTF-8 string keys and UTF-8 string values.
+Sort entries by unsigned UTF-8 key bytes, then encode the domain
+`earnproof:canonical-map:v1\0`, a big-endian `u32` entry count, and for each
+entry a big-endian `u32` key length, key bytes, big-endian `u32` value length,
+and value bytes. SHA-256 hashes that complete byte string.
+
+Duplicate keys are rejected before sorting or hashing. Numeric, object, byte,
+and other non-string key types are unsupported. Input order is not committed:
+every permutation of the same unique entries produces the same hash. The
+normative valid, permuted, UTF-8, duplicate, and unsupported-type vectors are
+in [canonical-map-v1.json](../tests/fixtures/encoding/canonical-map-v1.json),
+with independent Rust and TypeScript implementations in `tests/encoding`.
+
 ## Proof commitment algorithms
 
 The algorithm identifier is stored with each proof and is never inferred from

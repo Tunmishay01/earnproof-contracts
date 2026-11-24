@@ -71,4 +71,14 @@ Identifiers are bit indexes defined in
   undefined for the bitmap version or `>= 64`. Clients must treat an unknown
   `bitmap_version` as "no capabilities known" and fall back to probing.
 
+## Downgrade classification
+
+`classify_capability_transition` compares the previous and proposed bitmap
+without masking bits unknown to the current build. Unknown advertised bits
+must be preserved. Additive transitions are compatible; any removal within the
+same bitmap version is invalid. A removal across an explicit bitmap-version
+boundary is breaking and is allowed only when the release carries reviewed
+governance evidence. A capability marked required therefore cannot disappear
+through an ordinary upgrade or because an older client failed to recognize it.
+
 Both entrypoints are read-only, need no authorization, and cannot fail.

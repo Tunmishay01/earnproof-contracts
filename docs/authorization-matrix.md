@@ -179,3 +179,18 @@ fails immediately when the counts disagree.
 | Authorization tree assertions | 4 |
 | Stale/former-admin tests | 6 |
 | **Total authorization tests** | **21** |
+# Authorization depth and principal parity
+
+The focused harnesses in `tests/authorization` exercise two host-level
+boundaries in addition to the public entry-point matrix:
+
+- `depth_boundaries.rs` generates an eight-node nested authorization tree,
+  records its exact depth and resource use, rejects depth nine before writes,
+  and proves that authorizing only the root cannot satisfy a nested auth node.
+- `principal_parity.rs` runs `protocol-config.pause` with both a classic account
+  principal and a custom-account contract principal. The contract path uses a
+  real `CustomAccountInterface::__check_auth` authorization entry. Success and
+  failure produce equivalent state/event invariants, and contract credentials
+  cannot authorize a different account principal.
+
+Both suites use synthetic addresses and commit no signatures or wallet data.

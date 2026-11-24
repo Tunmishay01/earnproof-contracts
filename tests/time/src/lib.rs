@@ -764,4 +764,68 @@ mod tests {
             Err(Ok(earnproof_shared::ContractError::InvalidInput))
         );
     }
+
+    #[test]
+    fn timestamp_regression_does_not_reopen_an_expired_proof() {
+        let fixture = fixture();
+        register(&fixture, 0xE1, NOW + 10);
+
+        fixture.clock.env.ledger().set_sequence_number(101);
+        fixture.clock.set_to(NOW + 11);
+        assert!(!fixture
+            .proofs
+            .is_valid_proof(&bytes(&fixture.clock.env, 0xE1)));
+
+        fixture.clock.env.ledger().set_sequence_number(102);
+        fixture.clock.set_to(NOW + 5);
+        assert!(!fixture
+            .proofs
+            .is_valid_proof(&bytes(&fixture.clock.env, 0xE1)));
+        assert_eq!(
+            fixture
+                .proofs
+                .get_proof_validity(&bytes(&fixture.clock.env, 0xE1)),
+            earnproof_shared::ProofValidity::Expired
+        );
+    }
+
+    #[test]
+    fn equal_timestamps_are_deterministic_across_monotonic_ledgers() {
+        let fixture = fixture();
+        register(&fixture, 0xE2, NOW + 10);
+        fixture.clock.set_to(NOW + 10);
+        fixture.clock.env.ledger().set_sequence_number(201);
+        let first = fixture
+            .proofs
+            .get_proof_validity(&bytes(&fixture.clock.env, 0xE2));
+        fixture.clock.env.ledger().set_sequence_number(202);
+        let second = fixture
+            .proofs
+            .get_proof_validity(&bytes(&fixture.clock.env, 0xE2));
+        assert_eq!(first, second);
+        assert_eq!(second, earnproof_shared::ProofValidity::Active);
+    }
+
+    #[test]
+    fn revocation_metadata_uses_the_timestamp_high_water_mark() {
+        let fixture = fixture();
+        register(&fixture, 0xE3, NOW + 100);
+        fixture.clock.set_to(NOW + 20);
+        assert!(fixture
+            .proofs
+            .is_valid_proof(&bytes(&fixture.clock.env, 0xE3)));
+
+        fixture.clock.env.ledger().set_sequence_number(301);
+        fixture.clock.set_to(NOW + 10);
+        fixture
+            .proofs
+            .revoke_proof(&bytes(&fixture.clock.env, 0xE3));
+        assert_eq!(
+            fixture
+                .proofs
+                .get_proof(&bytes(&fixture.clock.env, 0xE3))
+                .revoked_at,
+            NOW + 20
+        );
+    }
 }

@@ -6,6 +6,13 @@ contract operation runs to those ceilings, and it is the specification that
 `tests/budgets/` (package `resource-budget-tests`) executes: every threshold
 below has a matching assertion, and the two must be changed together.
 
+Persistent footprint is gated alongside CPU and memory. The
+`storage_footprint` module measures contract-scoped persistent entry count and
+the XDR-encoded bytes of each key and value before and after minimum and
+maximum proof-registration operations. Failure and duplicate paths must have a
+zero delta. Each report names the responsible key families so a budget change
+is reviewable rather than an anonymous aggregate increase.
+
 **A note before anything else — read this first.** At the time of writing,
 `develop` does not compile (`cargo build --workspace` fails: a missing
 `#[contractevent]` macro import in `issuer-registry`, an unclosed delimiter

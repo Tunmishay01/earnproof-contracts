@@ -65,11 +65,39 @@ Three consequences follow, each of which is a test:
 
 Repeated calls in the same ledger are idempotent, and a read can never shorten an entry. Nothing on the network extends an entry implicitly: an entry that is never touched will expire, no matter how busy the rest of the contract is.
 
+### Renewal amplification matrix
+
+Renewal is scoped to keys required by the entrypoint. A cheap call cannot be
+used to keep unrelated records alive.
+
+| Entrypoint class | Keys eligible for renewal | Keys not renewed |
+|---|---|---|
+| `get_proof`, `is_valid_proof`, `is_revoked` | The named proof record | Other proofs, issuer records, schema records |
+| proof registration/revocation | Records written by the successful mutation | Unrelated proofs and indexes |
+| `get_issuer` | The named issuer record | Other issuers and reverse indexes |
+| `get_issuer_by_address` | The named reverse index | The referenced issuer record |
+| `is_active_address` | The named reverse index and its issuer record | Other issuers and indexes |
+| schema status queries | The named existing schema entry | Unknown schemas and unrelated versions |
+| failed or unauthorized calls | None; the invocation rolls back | All instance and persistent entries |
+
+The amplification tests age entries to the exact threshold, then exercise
+targeted, repeated, failed, and unauthorized calls. They also assert that
+failed calls emit no event. Repeating a successful read in one ledger leaves
+the already-renewed TTL unchanged.
+
 ---
 
 ## Key inventory: durability, trigger, and behaviour after expiry
 
-Every key below is either **instance** or **persistent** durability. No contract uses temporary storage, and a test asserts that all three temporary stores stay empty. Instance and persistent entries share the same archival rules, so "restored on access" applies uniformly.
+Every production key below is either **instance** or **persistent** durability.
+No deployed contract uses temporary storage, and a test asserts that all three
+temporary stores stay empty. A test-only probe in
+[`tests/ttl/src/temporary.rs`](../tests/ttl/src/temporary.rs) separately fixes
+the semantics future proposal, nonce, cursor, or coordination entries must
+obey: live before and on the final ledger, absent one ledger later, never
+restored, and never reusable after consumption or expiry. Instance and
+persistent entries share archival rules, so "restored on access" applies to
+those two durability classes only.
 
 ### `protocol-config`
 
@@ -191,6 +219,8 @@ Extension is the operator's job. Nothing in the protocol does it on a schedule.
 | Concern | Tests |
 |---|---|
 | Extension trigger boundaries, idempotence, long-run cadence | [`tests/ttl/src/extension.rs`](../tests/ttl/src/extension.rs) |
+| Targeted renewal and failed-call amplification resistance | [`tests/ttl/src/amplification.rs`](../tests/ttl/src/amplification.rs) |
 | Pre-expiry, final live ledger, first archived ledger, index divergence | [`tests/ttl/src/expiry.rs`](../tests/ttl/src/expiry.rs) |
 | Restoration contents, TTL, cost, authorization, re-registration | [`tests/ttl/src/restoration.rs`](../tests/ttl/src/restoration.rs) |
 | Uninitialized contracts, unknown records, unapproved schemas | [`tests/ttl/src/missing_state.rs`](../tests/ttl/src/missing_state.rs) |
+| Temporary proposal, nonce, cursor, and coordination expiry and replay | [`tests/ttl/src/temporary.rs`](../tests/ttl/src/temporary.rs) |
